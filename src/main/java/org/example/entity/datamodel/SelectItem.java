@@ -24,12 +24,9 @@ public class SelectItem {
     //public String containingClause="";                // SELECT / WHERE / JOIN ON / HAVING
 
     // === 安全推导辅助 ===
-    public boolean isBlackFunctionProcessed=false;           // 是否经过黑名单函数加工
-    public int inferredSensitiveLevel=-1;             // 推导出的安全等级
+    //public boolean isBlackFunctionProcessed=false;           // 是否经过黑名单函数加工
+    //public int inferredSensitiveLevel=-1;             // 推导出的安全等级
 
-    public String toString(){
-        return "字段名:"+selectItemDisplayName+"关联的物理字段:"+sourceColumns+"\n";
-    }
 
 }
 

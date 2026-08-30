@@ -24,11 +24,8 @@ public class SqlInfo {
     //public List<ColumnRef> whereColumns;            // WHERE条件中的字段
 
     // 对比辅助字段
-    public String fingerprint;                      // 结构指纹（用于快速匹配）
-    public int depth;                               // 当前SQL的嵌套深度
+    //public String fingerprint;                      // 结构指纹（用于快速匹配）
+    //public int depth;                               // 当前SQL的嵌套深度
 
-    public String toString(){
-        return "\nsql语句类型:"+sqlType+"\nsql原始语句:"+originalSql+"\n";
-    }
 
 }
