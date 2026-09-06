@@ -5,9 +5,7 @@ import org.example.hive.HiveParser;
 import org.example.hive.HiveParserBaseListener;
 
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Objects;
+import java.util.*;
 
 
 public class MyHiveListener extends HiveParserBaseListener{
@@ -32,10 +30,115 @@ public class MyHiveListener extends HiveParserBaseListener{
 
     int isTableFunction =0;   //是否为表函数,0---否,1---是
 
+    public Deque<Scope> scopeStack = new ArrayDeque<>();       //用栈来记录和管理作用域
+
+    public Deque<SqlInfo>sqlInfoStack = new ArrayDeque<>();    //用栈来记录和管理sql语句
+
+
+    //构建物理字段到表的映射，并将其与对应的查询列关联
+    public void resolveColumnToScope(String columnText, SelectItem selectItem) {
+
+        // 判断有无 前缀 (例如 "t1.id")
+        //为表设置了别名后,同一个层级中，别名会覆盖掉源表名,原表名如果再作为前缀使用，就会报错
+        if (columnText.contains(".")) {  //字段有前缀
+            String[] parts = columnText.split("[.]");
+
+            String columnTextAlias = parts[0];  //获取前缀(可能是表别名，也可能是原表名)
+
+            String colName = parts[1];  //获取物理字段名
+
+
+            // 从栈顶开始查找每个作用域Scope中的表别名
+            for (Scope scope : scopeStack) {
+                if (scope.aliasToTableMap.containsKey(columnTextAlias)) {  //找到了表别名与表的关联
+
+                    ColumnRef columnRef = new ColumnRef();  //用于封装表与物理字段的关系
+
+                    columnRef.columnName = colName; //记录字段名
+
+                    columnRef.originTable=scope.aliasToTableMap.get(columnTextAlias);  //获取并记录别名对应的表
+
+                    selectItem.sourceColumns.add(columnRef);  //将字段与表关系封装，并将其关联上对应的查询列
+                    return;
+                }
+            }
+            // 找不到物理字段对应的表，则报错
+            ColumnRef columnRef = new ColumnRef();  //用于封装表与物理字段的关系
+
+            columnRef.columnName = colName; //记录字段名
+
+            columnRef.originTable=null;  //将对应的表标记为未知
+
+            selectItem.sourceColumns.add(columnRef);
+            return;
+        }
+
+        // 裸字段 (例如 "id") ，即字段无前缀
+        boolean found = false;  //用于记录是否找到字段与表的关系
+
+        // 从栈顶开始查找每个作用域Scope中的所有字段
+        for (Scope scope : scopeStack) {
+
+            if (scope.columnToTableMap.containsKey(columnText)) {  //找到了字段与表的关联
+
+                List<TableInfo> tables = scope.columnToTableMap.get(columnText);  //获取到与该字段能够匹配的所有表
+
+                if (tables.size() == 1) {   //只有一张表能匹配该字段
+
+                    ColumnRef columnRef = new ColumnRef();
+
+                    columnRef.columnName = columnText;  //记录字段名
+
+                    columnRef.originTable=tables.getFirst();  //记录字段名匹配的表
+
+                    selectItem.sourceColumns.add(columnRef);  //将字段与表关系封装，并将其关联上对应的查询列
+
+                    found = true;  //标记已找到表与物理字段的关系
+                    break;
+
+
+                } else {
+
+                    // 多张表都能匹配这个字段，标记为歧义
+                    ColumnRef columnRef = new ColumnRef();
+
+                    columnRef.columnName = columnText;  //记录字段名
+
+                    columnRef.originTable=null;  //将匹配的表置空
+
+                    columnRef.isAmbiguous = true;  //标记字段匹配的表有多个
+
+                    selectItem.sourceColumns.add(columnRef);  //将字段与表关系封装，并将其关联上对应的查询列
+
+                    found = true;   //标记已找到表与物理字段的关系
+                    break;
+                }
+            }
+        }
+
+        if (!found) {
+            // 穿透到最外层依然找不到，说明是非真实存在的物理字段,可能是常量或函数生成的虚拟列，暂时留空
+
+            ColumnRef columnRef = new ColumnRef();  //用于封装表与物理字段的关系
+
+            columnRef.columnName = columnText; //记录字段名
+
+            columnRef.originTable=null;  //将匹配的表置空
+
+            selectItem.sourceColumns.add(columnRef);
+        }
+    }
+
+
+
     //分类型处理查询列
     public void enterPrecedenceFieldExpression(HiveParser.PrecedenceFieldExpressionContext ctx){
 
-        SelectItem selectItem=selectItems.getLast();   //获取最新查询列
+        SelectItem selectItem= !selectItems.isEmpty() ? selectItems.getLast():null;   //获取最新查询列
+
+        if(selectItem==null){   //无查询列,异常状况，直接退出
+            return;
+        }
 
         if(ctx.atomExpression().tableOrColumn() != null){  //查询列的物理字段
 
@@ -47,7 +150,7 @@ public class MyHiveListener extends HiveParserBaseListener{
             }
 
             //关联物理字段与查询列
-            selectItem.sourceColumns.add(ctx.getText());
+            resolveColumnToScope(ctx.getText(), selectItem);
         }
         else if(ctx.atomExpression().subQueryExpression() != null){  //查询列的子查询嵌套
 
@@ -343,14 +446,16 @@ public class MyHiveListener extends HiveParserBaseListener{
     //更新查询列层级和表层级，记录sql解析进度
     public void enterJoinSource(HiveParser.JoinSourceContext ctx){
 
-        //查询列层级更新
-        selectItemLever +=1;
+        Scope scope = new Scope();  //创建新的scope作用域
 
-        //表层级更新
-        tableLever= selectItemLever;
+        //关联父级作用域
+        scope.parentScope = scopeStack.isEmpty() ? null : scopeStack.peek();
 
-        //记录sql解析进度
-        enterFrom=1;
+        //设置作用域层级
+        scope.scopeLevel = scopeStack.size() + 1; // 直接用栈大小决定层级
+
+        //将作用域入栈
+        scopeStack.push(scope);
 
     }
 
@@ -386,7 +491,7 @@ public class MyHiveListener extends HiveParserBaseListener{
             else{
                 table.tableNameAlias="";  //记录默认表别名
             }
-            table.tableLevel=tableLever;   //记录数据源的层级
+            table.tableLevel=sqlInfoStack.size();   //记录数据源的层级,与当前作用域深度一致
 
             table.tableType=TableType.PHYSICAL; //表类型为 物理表
 
@@ -397,7 +502,7 @@ public class MyHiveListener extends HiveParserBaseListener{
             //记录当前子查询对应的表别名
             table.tableNameAlias=ctx.atomjoinSource().subQuerySource().id_().getText();
 
-            table.tableLevel=tableLever;    //记录数据源的层级
+            table.tableLevel=sqlInfoStack.size();    //记录数据源的层级
 
             table.tableType=TableType.SUBQUERY;  //表类型为 子查询
 
@@ -469,7 +574,7 @@ public class MyHiveListener extends HiveParserBaseListener{
 
                 //记录表函数的函数名和参数列表
                 table.tableFunctionName.add(tableFunctionName);
-                table.functionInputColumns.add(tableFunctionArgument);
+                //table.functionInputColumns.add(tableFunctionArgument);
 
             }
 
@@ -630,12 +735,15 @@ public class MyHiveListener extends HiveParserBaseListener{
 
             //获取原始sql文本
             sqlInfo.originalSql=ctx.getText();  //记录原始sql
-            if (!sqlInfos.isEmpty() && sqlInfos.getLast() != null) {  //判断有无父级sql语句
-                sqlInfo.parentSql=sqlInfos.getLast();  //关联父级sql语句
-                sqlInfos.getLast().childSqls.add(sqlInfo);  //关联孩子sql语句
-            }
 
-            sqlInfos.add(sqlInfo);   //将sql加入sql列表
+            if (!sqlInfoStack.isEmpty()) { //判断有无父级sql语句
+                sqlInfo.parentSql = sqlInfoStack.peek();  // 获取栈顶的sql,即父级sql
+                sqlInfoStack.peek().childSqls.add(sqlInfo);
+            }
+            sqlInfo.sqlLevel=sqlInfoStack.size()+1;  //记录sql语句的层级
+            sqlInfoStack.push(sqlInfo);  // 压入当前SQL
+
+
 
         }
         else{
@@ -649,9 +757,8 @@ public class MyHiveListener extends HiveParserBaseListener{
 
     public void exitQueryStatementExpression(HiveParser.QueryStatementExpressionContext ctx){
 
-        for (SelectItem selectItem : selectItems) {
-            System.out.println("======" + selectItem);
-        }
+
+
 
     }
 
@@ -665,27 +772,26 @@ public class MyHiveListener extends HiveParserBaseListener{
         if(isTableFunctionSub ==0){
 
             SqlInfo sqlInfo;
-            if(sqlOk==1 && !sqlInfos.isEmpty()&&sqlInfos.getLast()!=null){  //已有构造号的sql信息
+            if(sqlOk==1 && !sqlInfoStack.isEmpty()){  //已有构造号的sql信息
 
-                sqlInfo=sqlInfos.getLast(); //获取已经构造好的sql
+                sqlInfo=sqlInfoStack.peek(); //获取已经构造好的sql
                 sqlOk=0;  //标识重置
             }
             else{        //无构造号的sql信息
 
                 sqlInfo=new SqlInfo();   //封装sql查询语句信息
                 //记录原始sql文本
-                sqlInfos.getLast().originalSql=ctx.getText();
+                sqlInfo.originalSql=ctx.getText();
 
-                if (!sqlInfos.isEmpty() && sqlInfos.getLast() != null) {  //判断有无父级sql语句
-                    sqlInfo.parentSql=sqlInfos.getLast();  //关联父级sql语句
-                    sqlInfos.getLast().childSqls.add(sqlInfo);  //关联孩子sql语句
+                if (!sqlInfoStack.isEmpty()) {  //判断有无父级sql语句
+                    sqlInfo.parentSql=sqlInfoStack.peek();  //关联父级sql语句
+                    sqlInfoStack.peek().childSqls.add(sqlInfo);  //关联孩子sql语句
                 }
-                sqlInfos.add(sqlInfo);   //将sql加入sql列表
+                sqlInfo.sqlLevel=sqlInfoStack.size()+1;   //记录sql语句的层级
+
+                sqlInfoStack.push(sqlInfo);   //将sql加入sql列表
             }
             sqlInfo.sqlType="DQL";    //记录sql语句类型为查询语句
-            sqlLever+=1;  //更新sql层级
-            sqlInfo.sqlLevel=sqlLever;  //记录sql层级
-
         }
     }
 
@@ -695,23 +801,21 @@ public class MyHiveListener extends HiveParserBaseListener{
         //判断是否为表函数内部的子查询
         if(isTableFunctionSub ==0){
 
-            sqlLever-=1; // 更新sql层级
-
-            SqlInfo sqlInfo=sqlInfos.getLast();  //获取当前的查询sql
+            SqlInfo sqlInfo=sqlInfoStack.isEmpty()? null: sqlInfoStack.peek();  //获取栈顶sql(当前查询的sql)
 
             for (SelectItem selectItem : selectItems) {   //遍历并记录该sql的selectItem查询列
-                if (selectItem.selectItemLevel == sqlInfo.sqlLevel) {
+                if (sqlInfo != null && selectItem.selectItemLevel == sqlInfo.sqlLevel) {
                     sqlInfo.selectItems.add(selectItem);
                     selectItems.remove(selectItem);    //从列表中删除已记录的查询列
                 }
             }
 
-
             //sql不是初始sql语句的话,就移除它
-            if(sqlInfos.size()>1){
-                sqlInfos.removeLast();  //移除当前sql，当前sql已解析结束
+            if(sqlInfoStack.size()>1){
+                sqlInfoStack.pop();   //将栈顶的sql(当前sql)弹出，表示该sql已经解析完成
             }
         }
+
     }
 
 
