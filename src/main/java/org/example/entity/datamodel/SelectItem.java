@@ -3,6 +3,8 @@ package org.example.entity.datamodel;
 import java.util.ArrayList;
 import java.util.List;
 
+//查询列类
+//用于记录查询列信息
 public class SelectItem {
 
     // === 基础标识 ===
@@ -15,7 +17,7 @@ public class SelectItem {
     //private ParseTree rawAstNode;                   // 保留原始AST节点，供后续深度分析
 
     // === 来源追踪 ===
-    public List<String> sourceColumns = new ArrayList<>();         // 最终依赖的物理字段列表（多个表示多源组合）
+    public List<ColumnRef> sourceColumns = new ArrayList<>();         // 最终依赖的物理字段列表（多个表示多源组合）
     public List<FunctionInfo> functionChain= new ArrayList<>(); // 经过的函数调用链（按执行顺序）
     public TransformType transformType=null;            // DIRECT, SIMPLE, COMPLEX, CONSTANT
 

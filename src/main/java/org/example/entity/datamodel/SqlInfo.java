@@ -19,6 +19,8 @@ public class SqlInfo {
     public List<SelectItem> selectItems=new ArrayList<>();  //存储sql语句对应的所有字段信息
     public List<TableInfo> tables = new ArrayList<>();  //存储sql语句对应的所有表信息
 
+    public Scope sqlScope = null;    //记录本层sql语句的scope作用域
+
 
     //public List<JoinCondition> joinConditions;      // JOIN条件（独立出来）
     //public List<ColumnRef> whereColumns;            // WHERE条件中的字段
