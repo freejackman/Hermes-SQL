@@ -47,14 +47,16 @@ public class Scope {
             }
             else{
 
-                System.out.println(table.tableName+"表注册失败！作用域中表名已存在,请为表设置表别名 或使用库名.表名的形式");
-
-            }
+                throw new IllegalArgumentException(
+                        "表名 '" + tableNameAlias + "' 在当前作用域已存在，请使用别名区分");}
 
         }
         //不存在表名,也不存在别名
         else {
-            System.out.println("注册失败！请为表设置别名");
+
+            throw new IllegalArgumentException(
+                    "注册失败！请为表设置别名");
+
         }
     }
 }
