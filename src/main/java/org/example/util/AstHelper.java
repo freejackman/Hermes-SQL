@@ -57,6 +57,10 @@ public class AstHelper {
 
             results.add(candidate);
         }
+        // 子查询内部的字段由子查询自身的 enterSelectItem 处理，不在这里递归
+        else if (node instanceof HiveParser.SubQueryExpressionContext) {
+            return results;
+        }
         // 3. 正常递归深入子节点(深度遍历)（针对所有其他类型）
         else {
             // 注意：有的节点可能是 TerminalNode（叶子，如关键字、括号），
@@ -108,7 +112,7 @@ public class AstHelper {
             else if(parts.length == 3) {
 
                 // 场景：库名.表名.字段名
-                String columnTextAlias = parts[1].trim();  //获取前缀(可能是表别名，也可能是原表名)
+                String columnTextAlias = parts[0].trim()+'.'+parts[1].trim();  //获取前缀(可能是表别名，也可能是原表名)
 
                 String colName = parts[2].trim();  //获取物理字段名
 

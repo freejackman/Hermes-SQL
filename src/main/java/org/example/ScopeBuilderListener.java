@@ -11,6 +11,8 @@ import org.example.util.AstHelper;
 
 import java.util.*;
 
+
+
 //该类用于第一次遍历语法树，构建好所有的scope作用域以及与之对应的sql语句
 // (sql语句对应的查询列selectItem信息要在第二次 遍历语法树时，才会填充)
 public class ScopeBuilderListener extends HiveParserBaseListener {
@@ -584,13 +586,56 @@ public class ScopeBuilderListener extends HiveParserBaseListener {
     }
 
 
-    //记录sql语句的类型
+    //记录sql语句的类型，判断是否是查询列的子查询sql
     public void enterSelectStatement(HiveParser.SelectStatementContext ctx){
 
+        //判断是否是查询列的子查询sql
+
+        //判断 父节点是否是 SubQueryExpressionContext 类
+        if(ctx.getParent() instanceof HiveParser.SubQueryExpressionContext && !sqlInfoMap.containsKey(ctx)){
+
+            SqlInfo sqlInfo=new SqlInfo();   //封装sql查询语句信息
+
+            //获取原始sql文本
+            sqlInfo.originalSql=ctx.getText();  //记录原始sql
+
+            if (!sqlInfoStack.isEmpty() && sqlInfoStack.peek()!=null) { //判断有无父级sql语句
+                sqlInfo.parentSql = sqlInfoStack.peek();  // 获取栈顶的sql,即父级sql,关联父子sql
+                sqlInfoStack.peek().childSqls.add(sqlInfo);
+            }
+
+            sqlInfoStack.push(sqlInfo);  // 压入当前SQL
+            sqlInfo.sqlLevel=sqlInfoStack.size();  //记录当前sql语句的层级
+            sqlInfoMap.put(ctx, sqlInfo); //将节点与sql语句信息进行绑定。并存储起来
+
+        }
+
+        //记录当前sql的类型
         if (!sqlInfoStack.isEmpty() && sqlInfoStack.peek()!=null) {
             sqlInfoStack.peek().sqlType="DQL";  //sql语句为查询语句
         }
     }
+
+
+    //弹出查询列的子查询sql语句
+    public void exitSelectStatement(HiveParser.SelectStatementContext ctx){
+
+        //判断当前sql语句是否是查询列的子查询
+        if(sqlInfoMap.containsKey(ctx)){
+
+            SqlInfo sqlInfo=sqlInfoMap.get(ctx);  //获取该节点对应的sql信息
+
+            if (!sqlInfoStack.isEmpty() && sqlInfoStack.peek()== sqlInfo) {
+                sqlInfoStack.pop();  //当前sql信息解析完成,弹出
+            }
+        }else {
+            throw new IllegalStateException(
+                    "栈顶 SqlInfo 与当前 SelectStatement 不匹配，遍历异常"
+            );
+        }
+
+    }
+
 
 
     //构建scope,完善并记录scope相关信息，将scope作用域与对应的sql语句绑定
@@ -972,7 +1017,5 @@ public class ScopeBuilderListener extends HiveParserBaseListener {
         functionOutputStack.push(table);  //将输入源压入栈中
 
     }
-
-
 
 }

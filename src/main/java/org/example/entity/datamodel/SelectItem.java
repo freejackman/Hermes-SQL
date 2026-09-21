@@ -8,16 +8,21 @@ import java.util.List;
 public class SelectItem {
 
     // === 基础标识 ===
-    public String selectItemAlias ="";                           // 用户定义的别名 (AS xxx)
+
+    // 用户定义的别名 (AS xxx),支持单列别名,和多列别名(返回多列的表函数（UDTF）)
+    public List<String> selectItemAliasList=new ArrayList<>();
     public String normalizedExpression="";            // 标准化后的查询列（整个表达式文本）
-    public String selectItemDisplayName="";                     // 展示的名字（最终结果展示的名字，有别名，优先别名）
+
+    public List<String> selectItemDisplayNameList= new ArrayList<>();
+    //public String selectItemDisplayName="";     // 展示的名字（最终结果展示的名字，有别名，优先别名）
 
     // === 表达式结构（核心） ===
-    //private ExpressionType exprType;                // DIRECT, FUNCTION, CASE, WILDCARD, SUBQUERY, CONSTANT
+    public ExpressionType exprType;                // DIRECT, FUNCTION, CASE, WILDCARD, SUBQUERY, CONSTANT
     //private ParseTree rawAstNode;                   // 保留原始AST节点，供后续深度分析
 
     // === 来源追踪 ===
-    public List<ColumnRef> sourceColumns = new ArrayList<>();         // 最终依赖的物理字段列表（多个表示多源组合）
+    public List<ColumnRef>  sourceColumns = new ArrayList<>();         // 最终依赖的物理字段列表（多个表示多源组合）
+    public List<SqlInfo> selectItemSubQueries =new ArrayList<>();     //记录查询列的子查询sql
     public List<FunctionInfo> functionChain= new ArrayList<>(); // 经过的函数调用链（按执行顺序）
     public TransformType transformType=null;            // DIRECT, SIMPLE, COMPLEX, CONSTANT
 

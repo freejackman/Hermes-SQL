@@ -26,6 +26,11 @@ public class Scope {
             if(!this.aliasToTableMap.containsKey(tableNameAlias)) {
                 this.aliasToTableMap.put(tableNameAlias, table);   //将表与别名关系记录下来
             }
+            else{
+
+                throw new IllegalArgumentException(
+                        "表别名 '" + tableNameAlias + "' 在当前作用域已存在，请使用别名区分");
+            }
 
         }
         //库名，表名均存在
@@ -34,6 +39,11 @@ public class Scope {
             String tableNameAlias=table.dataBaseName+"."+table.tableName;   //用库名.表名作为key
             if(!this.aliasToTableMap.containsKey(tableNameAlias)) {
                 this.aliasToTableMap.put(tableNameAlias, table);   //将表与别名关系记录下来
+            }
+            else{
+
+                throw new IllegalArgumentException(
+                        "表名 '" + tableNameAlias + "' 在当前作用域已存在，请使用别名区分");
             }
         }
 
@@ -48,7 +58,8 @@ public class Scope {
             else{
 
                 throw new IllegalArgumentException(
-                        "表名 '" + tableNameAlias + "' 在当前作用域已存在，请使用别名区分");}
+                        "表名 '" + tableNameAlias + "' 在当前作用域已存在，请使用别名区分");
+            }
 
         }
         //不存在表名,也不存在别名
@@ -56,7 +67,6 @@ public class Scope {
 
             throw new IllegalArgumentException(
                     "注册失败！请为表设置别名");
-
         }
     }
 }
