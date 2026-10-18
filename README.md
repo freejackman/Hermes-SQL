@@ -99,12 +99,19 @@ SqlParseResultPrinter.print(scopeBuilder.firstSqlInfo);
 ```
 ## 🗺️ 开发路线图 (Roadmap)
 ☑ v0.1.0 基础骨架与数据模型设计 (2026-08)
+
 ☑ v0.1.0 第一阶段：ScopeBuilderListener 作用域构建器 (2026-09-11)
+
 ☑ v0.2.0 第二阶段：SqlAnalyzerListener 字段血缘提取 (2026-09-22)
+
 ☑ v0.3.0 复杂场景补全：CASE WHEN、列级子查询合并、UDTF 虚拟列穿透 (2026-10)
+
 □ v0.4.0 元数据服务接入（解析无元数据的裸字段）
+
 □ v0.5.0 方言差异分析模块 (hermes-diff) 与 SQL 隐式命名检测
+
 □ v1.0.0 血缘可视化与安全等级推导引擎闭环
+
 
 ## 📄 许可证
 本项目采用 Apache License 2.0，详情见 LICENSE 文件。
