@@ -29,20 +29,32 @@ public class AstHelper {
             return results;
         }
 
-
         // 1.  命中业务字段（核心）
-        // HiveParser 命中 tableOrColumn类代表 "id" 或 "t1.id"
-        if (node instanceof HiveParser.TableOrColumnContext) {
+        // HiveParser命中 precedenceFieldExpression，判断tableOrColumn类代表 "id" 或 "t1.id"，取 getText()
 
-            //子类强制转换为父类(如果node是子孙类的话)
-            HiveParser.TableOrColumnContext tc = (HiveParser.TableOrColumnContext) node;
+        if (node instanceof HiveParser.PrecedenceFieldExpressionContext) {
+            HiveParser.PrecedenceFieldExpressionContext pfCtx =
+                    (HiveParser.PrecedenceFieldExpressionContext) node;
 
-            String fullText = tc.getText();   //获取该节点的字符串形式
+            // 只有是纯字段引用（不是函数等）才处理
+            if (pfCtx.atomExpression() != null
+                    && pfCtx.atomExpression().tableOrColumn() != null) {
 
-            ColumnRef candidate = parseTableOrColumn(fullText);   //将该字段信息封装并获取
+                String fullText = pfCtx.getText();   // "t1.id" 或 "id" 或 "arr[0]"
+                ColumnRef candidate = parseTableOrColumn(fullText);
+                results.add(candidate);
+                return results;   // ★ 已经处理完，不要再往下递归
+            }
 
-            results.add(candidate);
+            // ★★★ 关键新增：不是纯字段引用（如 function_/CAST/CASE），继续递归子节点 ★★★
+            for (int i = 0; i < node.getChildCount(); i++) {
+                results.addAll(extractColumnCandidates(node.getChild(i)));
+            }
+
+            return results;   // ★ 递归完就直接返回，不再往下走 else if 链
         }
+
+
         // 2. 命中通配符（SELECT * 或 SELECT t1.*）
         else if (node instanceof HiveParser.TableAllColumnsContext) {
             // 这个规则匹配 "t1.*" 或 单独的 "*"
@@ -57,11 +69,11 @@ public class AstHelper {
 
             results.add(candidate);
         }
-        // 子查询内部的字段由子查询自身的 enterSelectItem 处理，不在这里递归
+        // 3.子查询内部的字段由子查询自身的 enterSelectItem 处理，不在这里递归
         else if (node instanceof HiveParser.SubQueryExpressionContext) {
             return results;
         }
-        // 3. 正常递归深入子节点(深度遍历)（针对所有其他类型）
+        // 4. 正常递归深入子节点(深度遍历)（针对所有其他类型）
         else {
             // 注意：有的节点可能是 TerminalNode（叶子，如关键字、括号），
             // 它们没有子节点，直接跳过即可
