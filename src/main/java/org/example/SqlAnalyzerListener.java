@@ -81,7 +81,8 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
 
     }
 
-    //函数参数为查询列的表达式
+
+    //处理函数嵌套情况，函数参数为查询列的表达式
     //时间间隔
     //cast,case,floor
     public void optExpressArgument(ParseTree ctx,FunctionInfo functionInfo,FunctionArgument functionArgument){
@@ -96,24 +97,30 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
     }
 
 
-    //处理case 多源表达式 的 不同位置的expression
+    //处理case 多源表达式 的 不同位置的expression,字段级颗粒度
     public void optCaseExpression(ParseTree ctx,FunctionArgument functionArgument){
 
-        // 向上找到最近的 CaseExpressionContext类
+        // 向上找到最近的 CaseExpressionContext类或WhenExpressionContext类
         ParseTree current = ctx.getParent();
         HiveParser.CaseExpressionContext caseCtx = null;
+        HiveParser.WhenExpressionContext whenCtx = null;
         while (current != null) {
             if (current instanceof HiveParser.CaseExpressionContext) {
                 caseCtx = (HiveParser.CaseExpressionContext) current;
                 break;
             }
+            if (current instanceof HiveParser.WhenExpressionContext) {
+                whenCtx = (HiveParser.WhenExpressionContext) current;
+            }
             current = current.getParent();
         }
 
-        if (caseCtx == null) {
-            throw new IllegalArgumentException("CASE 表达式解析异常：找不到 CaseExpressionContext 祖先");
+        if (caseCtx == null&& whenCtx == null) {
+            throw new IllegalArgumentException("CASE 表达式解析异常：找不到 Case 祖先");
         }
 
+        // 判断找到的是 whenCtx还是caseCtx
+        ParseTree anchor = (caseCtx != null) ? caseCtx : whenCtx;
 
         //caseCtx为 CaseExpressionContext类节点
         // 遍历 caseCtx 的所有子节点，找到包含 ctx 的那个 ExpressionContext
@@ -122,7 +129,7 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
         //关键：从 ctx 逐层向上，找到 caseCtx 的直接子节点
         ParseTree child = ctx;
         ParseTree parent = ctx.getParent();
-        while (parent != caseCtx) {
+        while (parent != anchor) {
             child = parent;
             parent = parent.getParent();
         }
@@ -131,8 +138,8 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
 
         // 找到 child 在 caseCtx 中的索引
         int idx = -1;
-        for (int i = 0; i < caseCtx.getChildCount(); i++) {
-            if (caseCtx.getChild(i) == child) {
+        for (int i = 0; i < anchor.getChildCount(); i++) {
+            if (anchor.getChild(i) == child) {
                 idx = i;
                 break;
             }
@@ -143,7 +150,7 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
         }
 
         //检查前一个兄弟节点
-        ParseTree lbrother = caseCtx.getChild(idx - 1);
+        ParseTree lbrother = anchor.getChild(idx - 1);
 
         //判断是否是终端节点
         if (!(lbrother instanceof TerminalNode)) {
@@ -178,6 +185,58 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
 
         functionStack.push(functionInfo); // 将函数压入栈
 
+    }
+
+
+    //处理最终物理来源字段列表中的来源字段 的来源非物理字段，而是虚拟表
+    //血缘穿透：如果字段归属到 FUNCTION 类型的虚拟表（如 LATERAL VIEW 产生的），穿透到它的输入源，用输入源字段替换当前的来源。
+    private void resolveVirtualColumnOrigin(SelectItem selectItem) {
+
+        List<ColumnRef> resolved = new ArrayList<>();
+
+        for (ColumnRef col : selectItem.sourceColumns) {
+
+            TableInfo origin = col.originTable;
+
+            // 只处理 FUNCTION 类型（LATERAL VIEW / PTF）
+            if (origin != null && origin.tableType == TableType.FUNCTION) {
+
+                TableInfo inputSource = origin.inputSourceTable;
+
+                // 有输入源 + 输入字段信息 → 穿透
+                if (inputSource != null && !origin.functionInputColumns.isEmpty()) {
+
+                    for (ColumnRef inputCol : origin.functionInputColumns) {
+
+                        ColumnRef newCol = new ColumnRef();
+                        // 优先用 inputCol 自带的 originTable；否则用 inputSource
+                        newCol.originTable = inputCol.originTable != null
+                                ? inputCol.originTable : inputSource;
+                        newCol.columnName = inputCol.columnName;
+                        newCol.tableAlias = inputCol.tableAlias;
+
+                        if (newCol.tableAlias == null || newCol.tableAlias.isEmpty()) {
+                            if (newCol.originTable != null && !newCol.originTable.tableNameAlias.isEmpty()) {
+                                newCol.tableAlias = newCol.originTable.tableNameAlias;
+                            }
+                        }
+
+                        resolved.add(newCol);
+                    }
+
+                    // 经过 explode 加工 → SIMPLE
+                    selectItem.transformType = TransformType.SIMPLE;
+
+                    continue;
+                }
+            }
+
+            // 非 FUNCTION 类型，保持原样
+            resolved.add(col);
+        }
+
+        selectItem.sourceColumns.clear();
+        selectItem.sourceColumns.addAll(resolved);
     }
 
 
@@ -293,7 +352,7 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
                             TableInfo tableInfo=scopeStack.peek().aliasToTableMap.get(tableAlias);
 
 
-                            //将来源字段与表关联
+                            //将 来源字段与表关联
                             columnRefs.getFirst().originTable=tableInfo;
 
                             //暂定，接入元数据后，删除
@@ -391,6 +450,7 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
                 //获取最终依赖的物理字段列表
                 columnRefs = astHelper.extractColumnCandidates(ctx.expression());
 
+
                 //封装并记录 最终来源的物理字段
                 if(!columnRefs.isEmpty()){
 
@@ -416,7 +476,7 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
 
 
                                     //将对应物理字段封装进对应表信息的 输出字段列表 中
-                                    //封装格式: 表别名.字段名, 库名.表名。字段名
+                                    //封装格式: 表别名.字段名, 库名.表名.字段名
 
                                     String column = tableAlias + "." + columnRef.columnName;
 
@@ -467,6 +527,7 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
                                     throw new IllegalArgumentException("物理字段[" + columnRef.columnName + "]在作用域中不存在");
                                 }
                             }
+
                         }
                     }
 
@@ -512,7 +573,6 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
             }
 
 
-
             //将所有函数与对应的查询列进行关联，并设置最终物理字段 来源类型
             if(!functions.isEmpty()){
 
@@ -550,7 +610,7 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
                 SelectItem selectItem = selectItemStack.peek();
 
                 //查询列存在别名
-                if(ctx.id_()!=null&&selectItem!=null){
+                if(ctx.id_()!=null&& !ctx.id_().isEmpty()&&selectItem!=null){
 
                     //遍历别名
                     for (int i=0;i<ctx.id_().size();i++){
@@ -566,6 +626,7 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
 
                 //查询列不存在别名,且无函数嵌套,用最终来源字段名作为展示名字
                 else if(selectItem!=null&& selectItem.functionChain.isEmpty()){
+
                     for (int i=0;i<selectItem.sourceColumns.size();i++){
 
                         String column = !Objects.equals(selectItem.sourceColumns.get(i).tableAlias, "") ?
@@ -596,6 +657,35 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
             }
 
 
+            //对最终物理来源字段 列表的所有数据进行去重
+            List<ColumnRef> raw = selectItemStack.peek().sourceColumns;
+            if (raw.size() > 1) {
+
+                //identityHashCode(originTable)：同一个物理表的多次引用是同一个对象实例，这样能正确识别"同一张表同一个字段"
+                LinkedHashMap<String, ColumnRef> dedupMap = new LinkedHashMap<>();
+
+                for (ColumnRef col : raw) {
+
+                    // key键：originTable 的内存地址 + 列名,
+                    // 来源表内存地址是为了区分 同字段名但不同表的情况
+                    String key = (col.originTable == null
+                            ? "null"
+                            : String.valueOf(System.identityHashCode(col.originTable)))
+                            + "|" + col.columnName;
+
+                    dedupMap.putIfAbsent(key, col);   //保证数据唯一性
+                }
+
+                raw.clear();  //清空原来的最终物理来源字段 列表
+
+                raw.addAll(dedupMap.values());
+            }
+
+
+            // 对最终物理来源字段 列表的所有数据进行穿透它们的来源
+            resolveVirtualColumnOrigin(selectItemStack.peek());
+
+
             selectItemStack.pop();   //当前单个查询列解析完毕，弹出
 
         }
@@ -619,6 +709,71 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
                     FunctionInfo functionInfo = functionStack.peek();    //获取正在解析的函数
 
                     List<ColumnRef> columnRefs= astHelper.extractColumnCandidates(ctx);  //获取并封装 物理字段
+
+                    //封装并记录 最终来源的物理字段
+                    if(!columnRefs.isEmpty()){
+
+                        for (ColumnRef columnRef : columnRefs) {
+
+                            String tableAlias = columnRef.tableAlias;    //获取物理字段对应的表的别名或表名
+
+                            //表别名或表名存在
+                            if (!Objects.equals(tableAlias, "")) {
+
+                                if (!scopeStack.isEmpty() && scopeStack.peek() != null) {
+
+                                    //在对应作用域中获取到查询列对应的表
+                                    if (scopeStack.peek().aliasToTableMap.containsKey(tableAlias)) {
+
+                                        TableInfo tableInfo = scopeStack.peek().aliasToTableMap.get(tableAlias);
+
+                                        columnRef.originTable = tableInfo;   //将最终来源字段与表进行关联
+
+
+                                        //将对应物理字段封装进对应表信息的 输出字段列表 中
+                                        //封装格式: 表别名.字段名, 库名.表名.字段名
+
+                                    } else {
+                                        throw new IllegalArgumentException("物理字段对应的表名[" + tableAlias + "]在作用域中不存在");
+                                    }
+                                }
+
+                            }
+
+                            //表别名或表名不存在(裸字段)
+                            else {
+
+                                if (!scopeStack.isEmpty() && scopeStack.peek() != null) {
+
+                                    //在当前对应的scope作用域查找物理字段对应的表
+                                    if (scopeStack.peek().columnToTableMap.containsKey(columnRef.columnName)) {
+
+                                        List<TableInfo> tableInfos = scopeStack.peek().columnToTableMap.get(columnRef.columnName);
+
+                                        //物理字段只对应一张表
+                                        if (tableInfos.size() == 1) {
+
+                                            //将最终来源字段与表进行关联
+                                            columnRef.originTable = tableInfos.getFirst();
+                                        }
+
+                                        //物理字段只对应多张表,字段存在歧义
+                                        else if (tableInfos.size() > 1) {
+                                            columnRef.isAmbiguous = true;  //标记 字段存在歧义
+
+                                        } else {
+                                            throw new IllegalArgumentException("阶段一作用域字段与表关系columnToTableMap解析错误");
+                                        }
+
+                                    } else {
+                                        throw new IllegalArgumentException("物理字段[" + columnRef.columnName + "]在作用域中不存在");
+                                    }
+                                }
+
+                            }
+                        }
+
+                    }
 
                     FunctionArgument functionArgument = new FunctionArgument();   //用于封装函数参数
 
@@ -781,7 +936,9 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
 
                     functionArgument.rawText=ctx.getText();  //获取参数原始文本
 
-                    functionArgument.constantValue=ctx.getText();    //关联常量与父函数参数
+                    functionArgument.constantValue=ctx.getText();  //存放常量
+
+                    functionStack.peek().arguments.add(functionArgument); //关联常量与父函数参数
 
                     //判断是否是 case()函数的参数，它的参数类型要特别处理
                     if(Objects.equals(functionStack.peek().functionName.toUpperCase(), "CASE")){
@@ -1155,10 +1312,6 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
             functionStack.pop();  //函数弹出
         }
     }
-
-
-
-
 
 
 
