@@ -6,6 +6,7 @@ import org.antlr.v4.runtime.tree.ParseTreeWalker;
 import org.example.entity.datamodel.SqlInfo;
 import org.example.hive.HiveLexer;   // 导入 Hive
 import org.example.hive.HiveParser;
+import org.example.util.SqlParseResultPrinter;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -13,7 +14,7 @@ import java.util.Map;
 public class Main {
     public static void main(String[] args) {
 
-        String sql="select id as t,count(min(max(concat(hive.id_card,phone)))) as test from (select ko from xxx)hive,(select ts,ss from spark)impala";
+        String sql="SELECT t.id, score FROM t LATERAL VIEW explode(arr) e AS scorew";
 
         //用于记录所有sql语句与节点的一对一关系，sql中包含对应的scope作用域信息
         Map<ParserRuleContext, SqlInfo> sqlInfoMap = new HashMap<>();
@@ -37,11 +38,21 @@ public class Main {
         //第一次遍历语法树
         ParseTreeWalker.DEFAULT.walk(scopeBuilder, tree);
 
+        //获取到最外层的sql语句信息
+        SqlInfo firstSqlInfo = scopeBuilder.firstSqlInfo;
+
         //创建sql分析器,用于填充sql的查询列
         SqlAnalyzerListener sqlAnalyzer = new SqlAnalyzerListener(sqlInfoMap);
 
         //第二次遍历语法树
         ParseTreeWalker.DEFAULT.walk(sqlAnalyzer, tree);
+
+        //打印出sql解析结果
+        SqlParseResultPrinter sqlParseResultPrinter = new SqlParseResultPrinter();
+
+        System.out.println(sqlParseResultPrinter.print(firstSqlInfo));
+
+
 
 
         //输出sql元数据提取结果
