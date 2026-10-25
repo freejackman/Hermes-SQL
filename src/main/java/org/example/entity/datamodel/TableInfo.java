@@ -9,7 +9,7 @@ public class TableInfo {
     public String tableName="";  //表名(物理表名)
     public String tableNameAlias ="";  //表别名
 
-    public int tableLevel =-1;  //表层级(主查询字段与子查询字段的区别),初始值为-1,最内层的子sql层级为0,向外层级逐渐增大
+    public int tableLevel =-1;  //表层级(主查询字段与子查询字段的区别),初始值为-1,最外层的子sql层级为0,向内层级逐渐增大
 
     public List<String> tableOutPutColumn = new ArrayList<>();      //存放该表所有的输出列
 

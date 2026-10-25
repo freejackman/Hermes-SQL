@@ -104,6 +104,7 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
         ParseTree current = ctx.getParent();
         HiveParser.CaseExpressionContext caseCtx = null;
         HiveParser.WhenExpressionContext whenCtx = null;
+
         while (current != null) {
             if (current instanceof HiveParser.CaseExpressionContext) {
                 caseCtx = (HiveParser.CaseExpressionContext) current;
@@ -111,6 +112,7 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
             }
             if (current instanceof HiveParser.WhenExpressionContext) {
                 whenCtx = (HiveParser.WhenExpressionContext) current;
+                break;
             }
             current = current.getParent();
         }
@@ -123,10 +125,11 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
         ParseTree anchor = (caseCtx != null) ? caseCtx : whenCtx;
 
         //caseCtx为 CaseExpressionContext类节点
-        // 遍历 caseCtx 的所有子节点，找到包含 ctx 的那个 ExpressionContext
+        //whenCtx为 WhenExpressionContext类节点
+        // 遍历 caseCtx 或 whenCtx 的所有子节点，找到包含 ctx 的那个 ExpressionContext
         // 然后看它前面的关键字是 KW_CASE / KW_WHEN / KW_THEN / KW_ELSE
 
-        //关键：从 ctx 逐层向上，找到 caseCtx 的直接子节点
+        //关键：从 ctx 逐层向上，找到 caseCtx 或 whenCtx 的直接子节点
         ParseTree child = ctx;
         ParseTree parent = ctx.getParent();
         while (parent != anchor) {
@@ -136,7 +139,7 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
 
 
 
-        // 找到 child 在 caseCtx 中的索引
+        // 找到 child 在 caseCtx 或 whenCtx 中的索引
         int idx = -1;
         for (int i = 0; i < anchor.getChildCount(); i++) {
             if (anchor.getChild(i) == child) {
@@ -188,57 +191,318 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
     }
 
 
-    //处理最终物理来源字段列表中的来源字段 的来源非物理字段，而是虚拟表
-    //血缘穿透：如果字段归属到 FUNCTION 类型的虚拟表（如 LATERAL VIEW 产生的），穿透到它的输入源，用输入源字段替换当前的来源。
+    //处理最终物理来源字段列表中的来源字段 的来源为 表函数和分区表函数
+    //血缘穿透：如果字段归属到 FUNCTION 类型的虚拟表（如 表函数LATERAL VIEW或分区表函数PTF 产生的），
+    // 穿透到该虚拟表的输入参数，用输入参数替换当前的来源。
     private void resolveVirtualColumnOrigin(SelectItem selectItem) {
 
-        List<ColumnRef> resolved = new ArrayList<>();
+        List<ColumnRef> resolved = new ArrayList<>();   //存放所有字段处理的结果
 
+        //遍历查询列的 最终物理来源字段列表
         for (ColumnRef col : selectItem.sourceColumns) {
 
-            TableInfo origin = col.originTable;
+            TableInfo origin = col.originTable;  //获取到字段的 来源
 
-            // 只处理 FUNCTION 类型（LATERAL VIEW / PTF）
+            // 只处理 FUNCTION 类型（LATERAL VIEW 表函数 / PTF分区表函数）
             if (origin != null && origin.tableType == TableType.FUNCTION) {
 
                 TableInfo inputSource = origin.inputSourceTable;
 
-                // 有输入源 + 输入字段信息 → 穿透
+                // 有输入源+ 获取输入源的输入字段信息 → 穿透
                 if (inputSource != null && !origin.functionInputColumns.isEmpty()) {
 
                     for (ColumnRef inputCol : origin.functionInputColumns) {
 
-                        ColumnRef newCol = new ColumnRef();
+                        ColumnRef newCol = new ColumnRef();  //用于封装真实来源信息
+
+
                         // 优先用 inputCol 自带的 originTable；否则用 inputSource
                         newCol.originTable = inputCol.originTable != null
                                 ? inputCol.originTable : inputSource;
+
+                        //记录物理字段名和表别名(前缀)
                         newCol.columnName = inputCol.columnName;
                         newCol.tableAlias = inputCol.tableAlias;
 
+                        //无前缀
                         if (newCol.tableAlias == null || newCol.tableAlias.isEmpty()) {
+
                             if (newCol.originTable != null && !newCol.originTable.tableNameAlias.isEmpty()) {
+
                                 newCol.tableAlias = newCol.originTable.tableNameAlias;
                             }
                         }
 
+                        //记录这个封装好的物理字段信息
                         resolved.add(newCol);
                     }
 
-                    // 经过 explode 加工 → SIMPLE
+                    // 经过 表函数和分区表函数 加工 → SIMPLE
                     selectItem.transformType = TransformType.SIMPLE;
 
                     continue;
                 }
             }
 
-            // 非 FUNCTION 类型，保持原样
+            // 其他的最终物理来源字段，保持原样
             resolved.add(col);
         }
 
-        selectItem.sourceColumns.clear();
+        selectItem.sourceColumns.clear();  //原来的最终物理来源字段被清除
+
         selectItem.sourceColumns.addAll(resolved);
     }
 
+    //确定并封装各个字段的数据来源
+    public void optColumnRefsList(List<ColumnRef> cols){
+
+        for (ColumnRef columnRef : cols) {
+
+            String tableAlias = columnRef.tableAlias;    //获取物理字段对应的表的别名或表名
+
+            //表别名或表名存在
+            if (!Objects.equals(tableAlias, "")) {
+
+                if (!scopeStack.isEmpty() && scopeStack.peek() != null) {
+
+                    //在对应作用域中获取到查询列对应的表
+                    if (scopeStack.peek().aliasToTableMap.containsKey(tableAlias)) {
+
+                        TableInfo tableInfo = scopeStack.peek().aliasToTableMap.get(tableAlias);
+
+                        columnRef.originTable = tableInfo;   //将最终来源字段与表进行关联
+
+                    } else {
+                        System.err.println("[WARN] JOIN ON 中的字段前缀 [" + tableAlias + "] 未找到，跳过归属绑定");
+                    }
+                }
+
+            }
+
+            //表别名或表名不存在(裸字段)
+            else {
+
+                if (!scopeStack.isEmpty() && scopeStack.peek() != null) {
+
+                    //在当前对应的scope作用域查找物理字段对应的表
+                    if (scopeStack.peek().columnToTableMap.containsKey(columnRef.columnName)) {
+
+                        List<TableInfo> tableInfos = scopeStack.peek().columnToTableMap.get(columnRef.columnName);
+
+                        //物理字段只对应一张表
+                        if (tableInfos.size() == 1) {
+
+                            //将最终来源字段与表进行关联
+                            columnRef.originTable = tableInfos.getFirst();
+                        }
+
+                        //物理字段只对应多张表,字段存在歧义
+                        else if (tableInfos.size() > 1) {
+                            columnRef.isAmbiguous = true;  //标记 字段存在歧义
+
+                        } else {
+                            throw new IllegalArgumentException("阶段一作用域字段与表关系columnToTableMap解析错误");
+                        }
+
+                    } else {
+                        throw new IllegalArgumentException("物理字段[" + columnRef.columnName + "]在作用域中不存在");
+                    }
+                }
+
+            }
+        }
+    }
+
+    // 统一构建并封装 JoinCondition（包含对常量的处理）
+    private void buildAndAddCondition(ParseTree leftNode, ParseTree opNode, ParseTree rightNode, List<JoinCondition> conditions) {
+
+        JoinCondition condition = new JoinCondition();
+
+        //获取并封装操作符
+        condition.operator = opNode.getText();
+
+        //记录原始文本
+        condition.rawConditionText = leftNode.getText() + " " + condition.operator + " " + rightNode.getText();
+
+        // 1. 提取常规字段（如果是子查询，这里提取不出来，会返回 一个空数组）
+        List<ColumnRef> leftCols = astHelper.extractColumnCandidates(leftNode);
+        List<ColumnRef> rightCols = astHelper.extractColumnCandidates(rightNode);
+
+        //确定并分装各字段的数据来源
+        optColumnRefsList(leftCols);
+        optColumnRefsList(rightCols);
+
+        //将左右各字段与join on 条件关联
+        condition.leftColumns =  leftCols;
+        condition.rightColumns = rightCols;
+
+        // 2. 提取左侧可能存在的子查询
+        findSubQueriesInNode(leftNode, condition.leftSubQueries);
+
+        // 3. 提取右侧可能存在的子查询
+        findSubQueriesInNode(rightNode, condition.rightSubQueries);
+
+        // 4. 过滤：只要左边有字段/子查询，或者右边有字段/子查询，就记录下来（防止其中有一边是常量而导致整体被遗漏）
+        boolean hasLeft = !condition.leftColumns.isEmpty() || !condition.leftSubQueries.isEmpty();
+        boolean hasRight = !condition.rightColumns.isEmpty() || !condition.rightSubQueries.isEmpty();
+
+        if (hasLeft || hasRight) {
+            conditions.add(condition);
+        }
+    }
+
+    // 处理join on 条件中的子查询
+    private void findSubQueriesInNode(ParseTree node, List<SqlInfo> targetList) {
+
+        if (node == null) return;
+
+        // 命中子查询
+        if (node instanceof HiveParser.SubQueryExpressionContext) {
+
+            // 子查询必定包裹着 selectStatement
+            HiveParser.SelectStatementContext selectCtx =
+                    ((HiveParser.SubQueryExpressionContext) node).selectStatement();
+
+            // 从 map 中取出第一阶段建好的 SqlInfo
+            if (selectCtx != null && sqlInfoMap.containsKey(selectCtx)) {
+                targetList.add(sqlInfoMap.get(selectCtx));
+            }
+            return; // 找到了就不再往下递归，防止重复提取
+        }
+
+        // 没找到就继续遍历子节点
+        for (int i = 0; i < node.getChildCount(); i++) {
+            findSubQueriesInNode(node.getChild(i), targetList);
+        }
+    }
+
+    //处理join on 后面的条件
+    public List<JoinCondition> optJoinExpression(ParseTree node){
+
+        List<JoinCondition> joinConditions = new ArrayList<>();
+
+        if (node == null) return joinConditions;
+
+        // 1. 处理 AND / OR 逻辑运算符
+        if (node instanceof HiveParser.PrecedenceAndExpressionContext ||
+                node instanceof HiveParser.PrecedenceOrExpressionContext) {
+
+            for (int i = 0; i < node.getChildCount(); i++) {
+                ParseTree child = node.getChild(i);
+                // 跳过 AND / OR 操作符节点本身，继续向下递归
+                if (!(child instanceof HiveParser.PrecedenceAndOperatorContext) &&
+                        !(child instanceof HiveParser.PrecedenceOrOperatorContext)) {
+                    joinConditions.addAll(optJoinExpression(child));
+                }
+            }
+            return joinConditions;
+        }
+
+
+        // 2. 处理等值操作符 (=, !=, <>) [ 子节点顺序为 左表达式, 操作符, 右表达式]
+        if (node instanceof HiveParser.PrecedenceEqualExpressionContext) {
+
+            if(node.getChildCount() > 1){
+                for (int i = 1; i + 1 < node.getChildCount(); i += 2) {
+                    ParseTree leftNode = node.getChild(i - 1);
+                    ParseTree opNode = node.getChild(i);
+                    ParseTree rightNode = node.getChild(i + 1);
+
+                    //封装join on 条件
+                    buildAndAddCondition(leftNode, opNode, rightNode, joinConditions);
+                }
+                return joinConditions;
+            }
+        }
+
+
+        // 3. 处理非等值操作符 (>, <, >=, <=, LIKE, IN)
+        // hive语法: precedenceSimilarExpressionMain :
+        // a = precedenceBitwiseOrExpression part = precedenceSimilarExpressionPart?
+        if (node instanceof HiveParser.PrecedenceSimilarExpressionMainContext) {
+            HiveParser.PrecedenceSimilarExpressionMainContext mainCtx
+                    = (HiveParser.PrecedenceSimilarExpressionMainContext) node;
+
+            ParseTree leftNode = mainCtx.getChild(0); // 左边表达式
+
+            // 如果存在 part（说明有操作符）
+            if (mainCtx.part != null && mainCtx.part.getChildCount() >= 2) {
+                ParseTree part = mainCtx.part;
+                ParseTree child0 = part.getChild(0);
+
+                // 情况 1: 比较操作符 (>, <, ,>=,<=,LIKE)
+                if (child0 instanceof HiveParser.PrecedenceSimilarOperatorContext) {
+                    ParseTree opNode = child0;
+
+                    ParseTree rightNode = part.getChild(1); // 右边表达式
+
+                    //封装join on 条件
+                    buildAndAddCondition(leftNode, opNode, rightNode, joinConditions);
+                }
+
+
+                else if (child0 instanceof HiveParser.PrecedenceSimilarExpressionAtomContext) {
+                    HiveParser.PrecedenceSimilarExpressionAtomContext atomCtx =
+                            (HiveParser.PrecedenceSimilarExpressionAtomContext) child0;
+
+                    // 情况 2: IN 操作符
+                    if (atomCtx.KW_IN() != null) {
+
+                        ParseTree opNode = atomCtx.getChild(0); // KW_IN 节点
+
+                        ParseTree rightNode = atomCtx.getChild(1); // IN 后面的括号或子查询
+
+                        buildAndAddCondition(leftNode, opNode, rightNode, joinConditions);
+                    }
+
+                    //情况3: between and
+                    else if(atomCtx.KW_BETWEEN() != null) {
+
+                        ParseTree rightNode = atomCtx.getChild(1); // KW_BETWEEN 后面的值
+
+                        ParseTree andright = atomCtx.getChild(3);  //KW_AND 后面的值
+
+                        //特殊情况,直接处理，没有使用封装函数
+                        JoinCondition condition = new JoinCondition();
+
+                        condition.operator = "BETWEEN";
+                        condition.rawConditionText =
+                                leftNode.getText() + " BETWEEN " + rightNode.getText()
+                                        + " AND " + andright.getText();
+
+                        condition.leftColumns = astHelper.extractColumnCandidates(leftNode);
+                        optColumnRefsList(condition.leftColumns);
+
+                        // 右边between后面的值和and后面的值都放到一起
+                        condition.rightColumns = astHelper.extractColumnCandidates(rightNode);
+                        condition.rightColumns.addAll(astHelper.extractColumnCandidates(andright));
+                        optColumnRefsList(condition.rightColumns);
+
+                        joinConditions.add(condition);
+
+                    }
+
+                    //情况4: like xxx
+                    else if(atomCtx.KW_LIKE() != null) {
+
+                        ParseTree opNode = atomCtx.getChild(0);  //KW_LIKE 节点
+
+                        ParseTree rightNode = atomCtx.getChild(2); // KW_LIKE (KW_ANY | KW_ALL) 后面的值
+
+                        buildAndAddCondition(leftNode, opNode, rightNode, joinConditions);
+                    }
+
+                }
+            }
+            return joinConditions; // 提取完直接返回，防止重复递归
+        }
+
+        // 4. 保底递归（防止漏掉深层嵌套的括号等）
+        for (int i = 0; i < node.getChildCount(); i++) {
+            joinConditions.addAll(optJoinExpression(node.getChild(i)));
+        }
+        return joinConditions;
+    }
 
     //查找对应的sql语句信息sqlinfo和作用域scope
     public void enterQueryStatementExpression(HiveParser.QueryStatementExpressionContext ctx){
@@ -283,7 +547,7 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
 
 
     //弹出查询列对应的子查询sql语句与scope作用域,
-    //将子查询sql与函数参数关联（如果是函数参数的话）,
+    //将子查询sql与函数参数关联（如果子查询sql是函数参数的话）,
     // 关联子查询sql与对应的查询列,清理同层级的函数列表,
     // 避免查询列的子查询的数据源中的表函数干扰
     public void exitSelectStatement(HiveParser.SelectStatementContext ctx){
@@ -656,6 +920,10 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
                 }
             }
 
+            // 对最终物理来源字段 列表的所有数据进行穿透它们的来源
+            resolveVirtualColumnOrigin(selectItemStack.peek());
+
+
 
             //对最终物理来源字段 列表的所有数据进行去重
             List<ColumnRef> raw = selectItemStack.peek().sourceColumns;
@@ -680,11 +948,6 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
 
                 raw.addAll(dedupMap.values());
             }
-
-
-            // 对最终物理来源字段 列表的所有数据进行穿透它们的来源
-            resolveVirtualColumnOrigin(selectItemStack.peek());
-
 
             selectItemStack.pop();   //当前单个查询列解析完毕，弹出
 
@@ -713,66 +976,8 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
                     //封装并记录 最终来源的物理字段
                     if(!columnRefs.isEmpty()){
 
-                        for (ColumnRef columnRef : columnRefs) {
-
-                            String tableAlias = columnRef.tableAlias;    //获取物理字段对应的表的别名或表名
-
-                            //表别名或表名存在
-                            if (!Objects.equals(tableAlias, "")) {
-
-                                if (!scopeStack.isEmpty() && scopeStack.peek() != null) {
-
-                                    //在对应作用域中获取到查询列对应的表
-                                    if (scopeStack.peek().aliasToTableMap.containsKey(tableAlias)) {
-
-                                        TableInfo tableInfo = scopeStack.peek().aliasToTableMap.get(tableAlias);
-
-                                        columnRef.originTable = tableInfo;   //将最终来源字段与表进行关联
-
-
-                                        //将对应物理字段封装进对应表信息的 输出字段列表 中
-                                        //封装格式: 表别名.字段名, 库名.表名.字段名
-
-                                    } else {
-                                        throw new IllegalArgumentException("物理字段对应的表名[" + tableAlias + "]在作用域中不存在");
-                                    }
-                                }
-
-                            }
-
-                            //表别名或表名不存在(裸字段)
-                            else {
-
-                                if (!scopeStack.isEmpty() && scopeStack.peek() != null) {
-
-                                    //在当前对应的scope作用域查找物理字段对应的表
-                                    if (scopeStack.peek().columnToTableMap.containsKey(columnRef.columnName)) {
-
-                                        List<TableInfo> tableInfos = scopeStack.peek().columnToTableMap.get(columnRef.columnName);
-
-                                        //物理字段只对应一张表
-                                        if (tableInfos.size() == 1) {
-
-                                            //将最终来源字段与表进行关联
-                                            columnRef.originTable = tableInfos.getFirst();
-                                        }
-
-                                        //物理字段只对应多张表,字段存在歧义
-                                        else if (tableInfos.size() > 1) {
-                                            columnRef.isAmbiguous = true;  //标记 字段存在歧义
-
-                                        } else {
-                                            throw new IllegalArgumentException("阶段一作用域字段与表关系columnToTableMap解析错误");
-                                        }
-
-                                    } else {
-                                        throw new IllegalArgumentException("物理字段[" + columnRef.columnName + "]在作用域中不存在");
-                                    }
-                                }
-
-                            }
-                        }
-
+                        //确定并封装每个字段的数据来源
+                        optColumnRefsList(columnRefs);
                     }
 
                     FunctionArgument functionArgument = new FunctionArgument();   //用于封装函数参数
@@ -1314,5 +1519,30 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
     }
 
 
+    //处理join on 条件，将其与对应的sql语句进行关联
+    public void exitJoinSource(HiveParser.JoinSourceContext ctx){
+
+        if(!ctx.KW_ON().isEmpty()){
+
+            int onCount= ctx.KW_ON().size();   //on 条件的个数
+
+            List<JoinCondition> joinConditions=new ArrayList<>();  //用于存放所有on条件中的字段
+
+            // 遍历所有的 ON 表达式
+            for (HiveParser.ExpressionContext exprCtx : ctx.expression()) {
+                joinConditions.addAll(optJoinExpression(exprCtx));
+            }
+
+
+            //将join on 条件关联对应的sql语句
+            if(!sqlInfoStack.isEmpty()&&sqlInfoStack.peek()!=null){
+                if(!joinConditions.isEmpty()){
+                    sqlInfoStack.peek().joinConditions.addAll(joinConditions);
+                }
+            }
+
+        }
+
+    }
 
 }

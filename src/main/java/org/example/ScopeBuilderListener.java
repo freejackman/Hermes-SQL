@@ -12,7 +12,6 @@ import org.example.util.AstHelper;
 import java.util.*;
 
 
-
 //该类用于第一次遍历语法树，构建好所有的scope作用域以及与之对应的sql语句
 // (sql语句对应的查询列selectItem信息要在第二次 遍历语法树时，才会填充)
 public class ScopeBuilderListener extends HiveParserBaseListener {
@@ -34,12 +33,15 @@ public class ScopeBuilderListener extends HiveParserBaseListener {
     // 因为两次遍历都是遍历的同一个parserTree，ParserRuleContext类可以保证节点的唯一性
     Map<ParserRuleContext, SqlInfo> sqlInfoMap ;  //将节点与sql语句信息进行绑定。并存储起来
 
+    SqlInfo firstSqlInfo=null ;   //用于记录最外层的sql语句信息，方便打印
+
 
     //作用域构造类的构造函数
     public ScopeBuilderListener(Map<ParserRuleContext, SqlInfo> sqlInfoMap){
 
         this.sqlInfoMap = sqlInfoMap;
     }
+
 
     //获取表函数(UDTF)的默认输出列
     public List<String> getUdtfDefaultSelectItem(String functionName) {
@@ -64,9 +66,10 @@ public class ScopeBuilderListener extends HiveParserBaseListener {
 
         }
 
+        //将表注册进对应的sql作用域中,即在作用域中关联表别名和表
         if (!scopeStack.isEmpty() && scopeStack.peek() != null) {
 
-            scopeStack.peek().registerTable(table);   //将表注册进对应的sql作用域中,即在作用域中关联表别名和表
+            scopeStack.peek().registerTable(table);
         }
 
         //关联当前数据源与sql语句
@@ -151,7 +154,7 @@ public class ScopeBuilderListener extends HiveParserBaseListener {
     }
 
 
-    //将输出列与表进行关联，并将其注册进对应的Scope作用域
+    //将输出列与表函数/虚拟表(内联表) 进行关联，并将其注册进对应的Scope作用域
     public void optOutPutScopeAndTable(TableInfo table,String outPutColumn){
 
         if (table==null) {
@@ -167,24 +170,28 @@ public class ScopeBuilderListener extends HiveParserBaseListener {
 
         if (!scopeStack.isEmpty() && scopeStack.peek() != null) {
 
-            //将字段与表函数的关系注册进作用域
+            //将字段与表函数/虚拟表 的关系注册进作用域
             if (scopeStack.peek().columnToTableMap.containsKey(outPutColumn)) {
 
-                //该字段在该作用域中已存在，将表函数与该字段进行绑定
+                //该字段在该作用域中已存在，将 表函数/虚拟表与该字段进行绑定
+
+                if(scopeStack.peek().columnToTableMap.get(outPutColumn).contains(table)){
+                    return;       //表函数/虚拟表 与该字段已经贝绑定
+                }
 
                 scopeStack.peek().columnToTableMap.get(outPutColumn).add(table);
+
             } else {  //该字段不存在于作用域
 
                 List<TableInfo> t = new ArrayList<>();   //用于封装表信息
-                t.add(table);  //记录当前表函数信息
+                t.add(table);  //记录当前 表函数/虚拟表 信息
 
-                //将表函数与输出字段关联，注册进对应的scope作用域中
+                //将 表函数/虚拟表 与输出字段关联，注册进对应的scope作用域中
                 scopeStack.peek().columnToTableMap.put(outPutColumn, t);
             }
         }
 
     }
-
 
 
     //处理最普通的物理表/视图
@@ -329,7 +336,7 @@ public class ScopeBuilderListener extends HiveParserBaseListener {
                 //获取并记录字段名
                 String columnName = ctx.id_().get(j).getText();
 
-                //将输出列与表进行关联，并将其注册进对应的Scope作用域
+                //将输出列与表函数进行关联，并将其注册进对应的Scope作用域
                 optOutPutScopeAndTable(functionTable,columnName);
 
             }
@@ -344,9 +351,6 @@ public class ScopeBuilderListener extends HiveParserBaseListener {
 
             if (Objects.equals(functionName.toLowerCase(), "posexplode")
                     && outPut == 1) {
-
-                //将输出列与表进行关联，并将其注册进对应的Scope作用域
-                optOutPutScopeAndTable(functionTable,ctx.id_().getFirst().getText());
 
                 //将输出列与表进行关联，并将其注册进对应的Scope作用域
                 optOutPutScopeAndTable(functionTable,"val");
@@ -490,7 +494,7 @@ public class ScopeBuilderListener extends HiveParserBaseListener {
 
 
     //处理数据源后的单个表函数(UDTF)
-    public void optLateralView(HiveParser.LateralViewContext ctx,TableInfo functionTable) {
+    public void  optLateralView(HiveParser.LateralViewContext ctx,TableInfo functionTable) {
 
         if(ctx==null){
             return;
@@ -570,11 +574,11 @@ public class ScopeBuilderListener extends HiveParserBaseListener {
     }
 
 
-    //弹出sql语句
+    //弹出sql语句,记录最外层sql语句信息，方便后续打印解析结果
     public void exitQueryStatementExpression(HiveParser.QueryStatementExpressionContext ctx){
 
         if (!sqlInfoStack.isEmpty()){
-            sqlInfoStack.pop();  //当前sql信息解析完成,弹出
+            this.firstSqlInfo=sqlInfoStack.pop();  //当前sql信息解析完成,弹出
         }
 
         // 顶层 SQL 解析完毕，清理所有临时栈
@@ -628,10 +632,6 @@ public class ScopeBuilderListener extends HiveParserBaseListener {
             if (!sqlInfoStack.isEmpty() && sqlInfoStack.peek()== sqlInfo) {
                 sqlInfoStack.pop();  //当前sql信息解析完成,弹出
             }
-        }else {
-            throw new IllegalStateException(
-                    "栈顶 SqlInfo 与当前 SelectStatement 不匹配，遍历异常"
-            );
         }
 
     }
@@ -719,7 +719,6 @@ public class ScopeBuilderListener extends HiveParserBaseListener {
             int tableLateralView = ctx.atomjoinSource().lateralView().size();
 
             for (int i = 0; i < tableLateralView; i++) {
-
 
 
                 TableInfo functionTable = new TableInfo();  //封装表函数

@@ -10,7 +10,7 @@ public class SqlInfo {
     public String sqlType="";           //sql语句类型
     public String originalSql="";        // 原始SQL文本
 
-    public int sqlLevel = -1;                   // -1表示初始值，1表示最外层sql，向内层逐渐递增
+    public int sqlLevel = -1;                   //  -1表示初始值，1表示最外层sql，向内层逐渐递增
 
     public SqlInfo parentSql=null;       // 父级SQL（用于子查询回溯）
 
@@ -22,12 +22,11 @@ public class SqlInfo {
     public Scope sqlScope = null;    //记录本层sql语句的scope作用域
 
 
-    //public List<JoinCondition> joinConditions;      // JOIN条件（独立出来）
+    public List<JoinCondition> joinConditions=new ArrayList<>();    // JOIN条件（独立出来）
     //public List<ColumnRef> whereColumns;            // WHERE条件中的字段
 
     // 对比辅助字段
     //public String fingerprint;                      // 结构指纹（用于快速匹配）
     //public int depth;                               // 当前SQL的嵌套深度
-
 
 }

@@ -14,7 +14,7 @@ import java.util.Map;
 public class Main {
     public static void main(String[] args) {
 
-        String sql="SELECT t.id, score FROM t LATERAL VIEW explode(arr) e AS scorew";
+        String sql="SELECT a.name, b.amount FROM user_table a JOIN order_table b ON a.id = b.user_id AND b.status > 1";
 
         //用于记录所有sql语句与节点的一对一关系，sql中包含对应的scope作用域信息
         Map<ParserRuleContext, SqlInfo> sqlInfoMap = new HashMap<>();

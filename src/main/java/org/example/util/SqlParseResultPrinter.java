@@ -5,20 +5,18 @@ import org.example.entity.datamodel.*;
 import java.util.List;
 
 //工具类，用来打印输出sql解析的结果
-
 //SQL 解析结果展示器：树形文本 + JSON 双格式
-
-
 public class SqlParseResultPrinter {
 
-    // ============ ANSI 颜色（可选，方便控制台区分） ============
+    // ============ ANSI 颜色 ============
     public static final String RESET = "\u001B[0m";
-    public static final String RED = "\u001B[31m";    // 错误/歧义（红色）
-    public static final String GREEN = "\u001B[32m";  // 血缘（绿色）
-    public static final String YELLOW = "\u001B[33m"; // 警告（黄色）
-    public static final String BLUE = "\u001B[34m";   // 表（蓝色）
-    public static final String MAGENTA = "\u001B[35m";// 函数(紫红色)
-    public static final String CYAN = "\u001B[36m";   // 层级/元信息（青色）
+    public static final String RED = "\u001B[31m";
+    public static final String GREEN = "\u001B[32m";
+    public static final String YELLOW = "\u001B[33m";
+    public static final String BLUE = "\u001B[34m";
+    public static final String MAGENTA = "\u001B[35m";
+    public static final String CYAN = "\u001B[36m";
+    public static final String PURPLE = "\u001B[35m";
 
     private boolean useColor = true;
 
@@ -30,49 +28,44 @@ public class SqlParseResultPrinter {
     }
 
     // ============ 主入口 ============
-
     public String print(SqlInfo sqlInfo) {
-
-        //StringBuilder 是一个可变的字符序列类，创建对象后，对象可以继续操作
         StringBuilder sb = new StringBuilder();
-
-        //打印sql解析后的详细信息
         printSqlInfo(sqlInfo, sb, 0);
-
         return sb.toString();
     }
 
-
-
     //打印解析后的sql语句详细信息
     private void printSqlInfo(SqlInfo sql, StringBuilder sb, int depth) {
-
         if (sql == null) return;
 
-        String indent = "  ".repeat(depth);   //根据深度，来确定每一行开头的间隔
+        String indent = "  ".repeat(depth);
 
         // 1. SQL 头
         sb.append("\n").append(indent)
                 .append(c(CYAN, "┌─ [SQL L" + sql.sqlLevel + "] "))
-                .append(truncate(sql.originalSql, 100)).append("\n");    //拼接原始sql语句文本
-
+                .append(truncate(sql.originalSql, 100)).append("\n");
 
         // 2. 表列表
         sb.append(indent).append("│ ").append(c(BLUE, "📦 Tables(" + sql.tables.size() + "):")).append("\n");
-
         for (TableInfo t : sql.tables) {
             sb.append(indent).append("│   ├─ ").append(formatTable(t)).append("\n");
         }
 
+        // ★★★ 3. 新增：JOIN ON 条件 ★★★
+        if (sql.joinConditions != null && !sql.joinConditions.isEmpty()) {
+            sb.append(indent).append("│ ").append(c(YELLOW, "🔗 JoinConditions(" + sql.joinConditions.size() + "):")).append("\n");
+            for (JoinCondition jc : sql.joinConditions) {
+                printJoinCondition(jc, sb, depth + 1);
+            }
+        }
 
-
-        // 3. 查询列
+        // 4. 查询列
         sb.append(indent).append("│ ").append(c(MAGENTA, "📋 SelectItems(" + sql.selectItems.size() + "):")).append("\n");
         for (int i = 0; i < sql.selectItems.size(); i++) {
             printSelectItem(sql.selectItems.get(i), sb, depth + 1, i + 1);
         }
 
-        // 4. 子查询递归
+        // 5. 子查询递归
         if (!sql.childSqls.isEmpty()) {
             sb.append(indent).append("│ ").append(c(CYAN, "🔍 SubQueries(" + sql.childSqls.size() + "):")).append("\n");
             for (SqlInfo child : sql.childSqls) {
@@ -80,30 +73,62 @@ public class SqlParseResultPrinter {
             }
         }
 
-        sb.append(indent).append(c(CYAN, "└─") ).append("\n");
+        sb.append(indent).append(c(CYAN, "└─")).append("\n");
+    }
+
+    // ★ 新增：打印 JOIN 条件
+    private void printJoinCondition(JoinCondition jc, StringBuilder sb, int depth) {
+        String indent = "  ".repeat(depth);
+
+        // 打印操作符和原始文本
+        sb.append(indent).append("├─ ").append(c(YELLOW, "[" + jc.operator + "] "))
+                .append(truncate(jc.rawConditionText, 60)).append("\n");
+
+        // 打印左侧字段
+        if (jc.leftColumns != null && !jc.leftColumns.isEmpty()) {
+            sb.append(indent).append("│   ├─ Left:  ");
+            for (int i = 0; i < jc.leftColumns.size(); i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(formatColumnRef(jc.leftColumns.get(i)));
+            }
+            sb.append("\n");
+        }
+
+        // 打印左侧子查询
+        if (jc.leftSubQueries != null && !jc.leftSubQueries.isEmpty()) {
+            sb.append(indent).append("│   ├─ Left SubQuery: (see child SQLs below)\n");
+        }
+
+        // 打印右侧字段
+        if (jc.rightColumns != null && !jc.rightColumns.isEmpty()) {
+            sb.append(indent).append("│   ├─ Right: ");
+            for (int i = 0; i < jc.rightColumns.size(); i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(formatColumnRef(jc.rightColumns.get(i)));
+            }
+            sb.append("\n");
+        }
+
+        // 打印右侧子查询
+        if (jc.rightSubQueries != null && !jc.rightSubQueries.isEmpty()) {
+            sb.append(indent).append("│   ├─ Right SubQuery: (see child SQLs below)\n");
+        }
     }
 
     private void printSelectItem(SelectItem item, StringBuilder sb, int depth, int idx) {
         String indent = "  ".repeat(depth);
 
-        // 别名 / 展示名
-        String alias = item.selectItemAliasList.isEmpty()
-                ? "(no alias)"
-                : String.join(",", item.selectItemAliasList);
-        String display = item.selectItemDisplayNameList.isEmpty()
-                ? "(no display)"
-                : String.join(",", item.selectItemDisplayNameList);
+        String alias = item.selectItemAliasList.isEmpty() ? "(no alias)" : String.join(",", item.selectItemAliasList);
+        String display = item.selectItemDisplayNameList.isEmpty() ? "(no display)" : String.join(",", item.selectItemDisplayNameList);
 
         sb.append(indent).append("├─ #").append(idx).append(" ")
                 .append(c(MAGENTA, truncate(item.normalizedExpression, 60)))
                 .append("  [alias=").append(alias).append(", display=").append(display).append("]\n");
 
-        // 表达式元信息
         sb.append(indent).append("│   ├─ exprType=").append(item.exprType)
                 .append(", transformType=").append(item.transformType)
                 .append(", level=").append(item.selectItemLevel).append("\n");
 
-        // 血缘字段
         if (!item.sourceColumns.isEmpty()) {
             sb.append(indent).append("│   ├─ ").append(c(GREEN, "🩸 SourceColumns(" + item.sourceColumns.size() + "):")).append("\n");
             for (ColumnRef col : item.sourceColumns) {
@@ -111,7 +136,6 @@ public class SqlParseResultPrinter {
             }
         }
 
-        // 函数链
         if (!item.functionChain.isEmpty()) {
             sb.append(indent).append("│   ├─ ").append(c(MAGENTA, "🧩 FunctionChain(" + item.functionChain.size() + "):")).append("\n");
             for (FunctionInfo f : item.functionChain) {
@@ -119,7 +143,6 @@ public class SqlParseResultPrinter {
             }
         }
 
-        // 查询列子查询
         if (!item.selectItemSubQueries.isEmpty()) {
             sb.append(indent).append("│   └─ ").append(c(CYAN, "🔍 InlineSubQueries(" + item.selectItemSubQueries.size() + ")"))
                     .append(" (see child SQLs below)\n");
@@ -137,21 +160,17 @@ public class SqlParseResultPrinter {
         }
     }
 
-
-    // ============ 格式化工具 ============
-
     private String formatTable(TableInfo t) {
-        String name = t.dataBaseName.isEmpty()
-                ? t.tableName
-                : t.dataBaseName + "." + t.tableName;
+        // ★ 安全判空：防止 t.dataBaseName 或 t.tableName 为 null 导致 NPE
+        String dbName = t.dataBaseName == null ? "" : t.dataBaseName;
+        String tblName = t.tableName == null ? "" : t.tableName;
 
+        String name = dbName.isEmpty() ? tblName : dbName + "." + tblName;
         String aliasPart = "";
 
         if (name.isEmpty()) {
-            // 没有真实表名 → 用别名当显示名，不加 AS
-            name = t.tableNameAlias.isEmpty() ? "(unnamed)" : t.tableNameAlias;
-        } else if (!t.tableNameAlias.isEmpty()) {
-            // 有真实表名 + 有别名 → 显示 "name AS alias"
+            name = (t.tableNameAlias == null || t.tableNameAlias.isEmpty()) ? "(unnamed)" : t.tableNameAlias;
+        } else if (t.tableNameAlias != null && !t.tableNameAlias.isEmpty()) {
             aliasPart = " AS " + t.tableNameAlias;
         }
 
@@ -159,13 +178,19 @@ public class SqlParseResultPrinter {
         return String.format("%s%s [%s, L%d]", name, aliasPart, type, t.tableLevel);
     }
 
-
     private String formatColumnRef(ColumnRef col) {
         StringBuilder sb = new StringBuilder();
-        String tableName = col.originTable == null ? "(unknown)"
-                : (col.originTable.tableName.isEmpty() ? col.originTable.tableNameAlias : col.originTable.tableName);
+        String tableName = "(unknown)";
+        if (col.originTable != null) {
+            String tName = col.originTable.tableName == null ? "" : col.originTable.tableName;
+            String aName = col.originTable.tableNameAlias == null ? "" : col.originTable.tableNameAlias;
+            tableName = tName.isEmpty() ? aName : tName;
+        }
+
         sb.append(c(GREEN, tableName + "." + col.columnName));
-        if (!col.tableAlias.isEmpty()) sb.append(" (from=").append(col.tableAlias).append(")");
+        if (col.tableAlias != null && !col.tableAlias.isEmpty()) {
+            sb.append(" (from=").append(col.tableAlias).append(")");
+        }
         if (col.isWildcard) sb.append(c(YELLOW, " [*]"));
         if (col.isAmbiguous) sb.append(c(RED, " [⚠ ambiguous]"));
         return sb.toString();
@@ -188,5 +213,4 @@ public class SqlParseResultPrinter {
         if (s == null) return "";
         return s.length() <= max ? s : s.substring(0, max) + "...";
     }
-
 }

@@ -41,12 +41,20 @@ public class AstHelper {
                     && pfCtx.atomExpression().tableOrColumn() != null) {
 
                 String fullText = pfCtx.getText();   // "t1.id" 或 "id" 或 "arr[0]"
+
                 ColumnRef candidate = parseTableOrColumn(fullText);
+
                 results.add(candidate);
-                return results;   // ★ 已经处理完，不要再往下递归
+                return results;   // 已经处理完，不要再往下递归
             }
 
-            // ★★★ 关键新增：不是纯字段引用（如 function_/CAST/CASE），继续递归子节点 ★★★
+            //子查询内部的字段由子查询自身的 enterSelectItem 处理，不在这里递归
+            if(pfCtx.atomExpression() != null
+                    && pfCtx.atomExpression().subQueryExpression() != null) {
+                return results;
+            }
+
+            // 关键新增：不是纯字段引用（如 function_/CAST/CASE），继续递归子节点
             for (int i = 0; i < node.getChildCount(); i++) {
                 results.addAll(extractColumnCandidates(node.getChild(i)));
             }
@@ -69,11 +77,8 @@ public class AstHelper {
 
             results.add(candidate);
         }
-        // 3.子查询内部的字段由子查询自身的 enterSelectItem 处理，不在这里递归
-        else if (node instanceof HiveParser.SubQueryExpressionContext) {
-            return results;
-        }
-        // 4. 正常递归深入子节点(深度遍历)（针对所有其他类型）
+
+        // 3. 正常递归深入子节点(深度遍历)（针对所有其他类型）
         else {
             // 注意：有的节点可能是 TerminalNode（叶子，如关键字、括号），
             // 它们没有子节点，直接跳过即可
