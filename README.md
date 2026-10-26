@@ -30,6 +30,7 @@
 - **复杂 SQL 场景全覆盖**：支持多表 JOIN、子查询（FROM 级/列级）、CASE WHEN 多源表达式、LATERAL VIEW (UDTF 虚拟列穿透)、分区表函数 (PTF)。
 - **精准血缘定位**：解决 `t1.id` vs `id` 别名归属问题，自动标记多表同名字段歧义 (`isAmbiguous`)。
 - **深度关联关系分析**：自动提取 JOIN ON 中的等值与非等值条件（支持拉链表时间窗口），精准识别物理字段级别的关联依赖。
+- **统一过滤条件模型 (FilterCondition)**：完美统一 `JOIN ON` 与 `WHERE` 子句解析。支持提取 `AND/OR` 嵌套、`IN / BETWEEN / LIKE`，并**自动识别 WHERE 中的隐式 JOIN**。
 
 ---
 
@@ -77,27 +78,38 @@ ParseTreeWalker.DEFAULT.walk(new ScopeBuilderListener(sqlInfoMap), tree);
 // 3. 第二阶段：字段血缘提取 (Double-pass Pass 2)
 ParseTreeWalker.DEFAULT.walk(new SqlAnalyzerListener(sqlInfoMap), tree);
 
-// 4. 树形输出展示
-SqlParseResultPrinter.print(scopeBuilder.firstSqlInfo);
+// 4. 树形输出展示 (注意 print 返回的是 String，需要输出到控制台)
+SqlParseResultPrinter printer = new SqlParseResultPrinter(true);
+System.out.println(printer.print(scopeBuilder.firstSqlInfo));
 ```
 ### 3.解析效果展示
 
-对于 SQL SELECT t.id, score FROM t LATERAL VIEW explode(arr) e AS score，核心血缘追踪输出如下：
+对于 SQL SELECT a.name, b.amount FROM user_table a JOIN order_table b ON a.id = b.user_id WHERE a.status = 1 AND b.amount > 100，核心血缘追踪输出如下：
 ```
-┌─ [SQL L1] SELECTt.id,scoreFROMtLATERALVIEWexplode(arr)eASscore
+┌─ [SQL L1] SELECTa.name,b.amountFROMuser_tableaJOINorder_tablebONa.id=b.user_idWHEREa.status=1ANDb.amount>100
 │ 📦 Tables(2):
-│   ├─ t [PHYSICAL, L1]
-│   ├─ e [FUNCTION, L1]
+│   ├─ user_table AS a [PHYSICAL, L1]
+│   ├─ order_table AS b [PHYSICAL, L1]
+│ 🔍 WhereConditions(2):
+│   ├─ [=] a.status = 1
+│   │   ├─ Left:  user_table.status (from=a)
+│   ├─ [>] b.amount > 100
+│   │   ├─ Left:  order_table.amount (from=b)
+│ 🔗 JoinConditions(1):
+│   ├─ [=] a.id = b.user_id
+│   │   ├─ Left:  user_table.id (from=a)
+│   │   ├─ Right: order_table.user_id (from=b)
 │ 📋 SelectItems(2):
-│   ├─ #1 t.id
+│   ├─ #1 a.name
 │   │   ├─ exprType=DIRECT, transformType=DIRECT
 │   │   ├─ 🩸 SourceColumns(1):
-│   │   │   └─ t.id (alias=t)
-│   ├─ #2 score
-│   │   ├─ exprType=DIRECT, transformType=SIMPLE  (经过 UDTF 加工)
+│   │   │   └─ user_table.name (from=a)
+│   ├─ #2 b.amount
+│   │   ├─ exprType=DIRECT, transformType=DIRECT
 │   │   ├─ 🩸 SourceColumns(1):
-│   │   │   └─ t.arr   (穿透虚拟表 e，精准溯源至底层数组字段)
+│   │   │   └─ order_table.amount (from=b)
 ```
+## 🗺️ 开发路线图 (Roadmap)
 ## 🗺️ 开发路线图 (Roadmap)
 ☑ v0.1.0 基础骨架与数据模型设计 (2026-08)
 
@@ -105,11 +117,15 @@ SqlParseResultPrinter.print(scopeBuilder.firstSqlInfo);
 
 ☑ v0.2.0 第二阶段：SqlAnalyzerListener 字段血缘提取 (2026-09-22)
 
-☑ v0.3.0 复杂场景补全：CASE WHEN、列级子查询合并、UDTF 虚拟列穿透 (2026-10)
+☑ v0.3.0 复杂场景补全：CASE WHEN、列级子查询合并、UDTF 虚拟列穿透 (2026-10-19)
 
-□ v0.4.0 元数据服务接入（解析无元数据的裸字段）
+☑ v0.4.0 条件解析大满贯：JOIN ON 深度解析、WHERE 过滤条件、隐式 JOIN 识别 (2026-10-24)
 
-□ v0.5.0 方言差异分析模块 (hermes-diff) 与 SQL 隐式命名检测
+☑ v0.4.1 可视化展示升级：树形结构高亮区分、SqlParseResultPrinter 完善 (2026-10-26)
+
+□ v0.5.0 元数据服务接入（解析无元数据的裸字段）
+
+□ v0.6.0 方言差异分析模块 (hermes-diff) 与 SQL 隐式命名检测
 
 □ v1.0.0 血缘可视化与安全等级推导引擎闭环
 
