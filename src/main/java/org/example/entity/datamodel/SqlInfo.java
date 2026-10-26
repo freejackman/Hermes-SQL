@@ -22,8 +22,8 @@ public class SqlInfo {
     public Scope sqlScope = null;    //记录本层sql语句的scope作用域
 
 
-    public List<JoinCondition> joinConditions=new ArrayList<>();    // JOIN条件（独立出来）
-    //public List<ColumnRef> whereColumns;            // WHERE条件中的字段
+    public List<FilterCondition> joinConditions =new ArrayList<>();    // JOIN条件（独立出来）
+    public List<FilterCondition> whereConditions=new ArrayList<>();       // WHERE条件中的字段
 
     // 对比辅助字段
     //public String fingerprint;                      // 结构指纹（用于快速匹配）

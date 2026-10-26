@@ -313,10 +313,10 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
         }
     }
 
-    // 统一构建并封装 JoinCondition（包含对常量的处理）
-    private void buildAndAddCondition(ParseTree leftNode, ParseTree opNode, ParseTree rightNode, List<JoinCondition> conditions) {
+    // 统一构建并封装 FilterCondition（包含对常量的处理）
+    private void buildAndAddCondition(ParseTree leftNode, ParseTree opNode, ParseTree rightNode, List<FilterCondition> conditions,boolean isWhere) {
 
-        JoinCondition condition = new JoinCondition();
+        FilterCondition condition = new FilterCondition();
 
         //获取并封装操作符
         condition.operator = opNode.getText();
@@ -346,12 +346,28 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
         boolean hasLeft = !condition.leftColumns.isEmpty() || !condition.leftSubQueries.isEmpty();
         boolean hasRight = !condition.rightColumns.isEmpty() || !condition.rightSubQueries.isEmpty();
 
+        //判断是否是where 条件
+        if (isWhere && hasLeft && hasRight) {
+
+            if(!condition.leftColumns.isEmpty()&&!condition.rightColumns.isEmpty()){
+
+                ColumnRef leftCol = condition.leftColumns.getFirst();
+                ColumnRef rightCol = condition.rightColumns.getFirst();
+
+                // 两边都有归属表，且不是同一张表，才是隐式 JOIN
+                if (leftCol.originTable != null && rightCol.originTable != null
+                        && leftCol.originTable != rightCol.originTable) {
+                    condition.isImplicitJoin = true;
+                }
+            }
+        }
+
         if (hasLeft || hasRight) {
             conditions.add(condition);
         }
     }
 
-    // 处理join on 条件中的子查询
+    // 处理join on 或where 条件中的子查询
     private void findSubQueriesInNode(ParseTree node, List<SqlInfo> targetList) {
 
         if (node == null) return;
@@ -376,12 +392,12 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
         }
     }
 
-    //处理join on 后面的条件
-    public List<JoinCondition> optJoinExpression(ParseTree node){
+    //处理join on 或 where 后面的条件
+    public List<FilterCondition> optJoinAndWhereExpression(ParseTree node, boolean isWhere){
 
-        List<JoinCondition> joinConditions = new ArrayList<>();
+        List<FilterCondition> filterConditions = new ArrayList<>();
 
-        if (node == null) return joinConditions;
+        if (node == null) return filterConditions;
 
         // 1. 处理 AND / OR 逻辑运算符
         if (node instanceof HiveParser.PrecedenceAndExpressionContext ||
@@ -392,27 +408,30 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
                 // 跳过 AND / OR 操作符节点本身，继续向下递归
                 if (!(child instanceof HiveParser.PrecedenceAndOperatorContext) &&
                         !(child instanceof HiveParser.PrecedenceOrOperatorContext)) {
-                    joinConditions.addAll(optJoinExpression(child));
+                    filterConditions.addAll(optJoinAndWhereExpression(child,isWhere));
                 }
             }
-            return joinConditions;
+            return filterConditions;
         }
 
 
         // 2. 处理等值操作符 (=, !=, <>) [ 子节点顺序为 左表达式, 操作符, 右表达式]
         if (node instanceof HiveParser.PrecedenceEqualExpressionContext) {
 
+            //操作符 = 存在
             if(node.getChildCount() > 1){
                 for (int i = 1; i + 1 < node.getChildCount(); i += 2) {
                     ParseTree leftNode = node.getChild(i - 1);
                     ParseTree opNode = node.getChild(i);
                     ParseTree rightNode = node.getChild(i + 1);
 
-                    //封装join on 条件
-                    buildAndAddCondition(leftNode, opNode, rightNode, joinConditions);
+                    //封装join on 或 where 条件
+                    buildAndAddCondition(leftNode, opNode, rightNode, filterConditions,isWhere);
                 }
-                return joinConditions;
+                return filterConditions;
             }
+
+            //操作符== 不存在，可能是 不等式或者单个数值
         }
 
 
@@ -436,12 +455,13 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
 
                     ParseTree rightNode = part.getChild(1); // 右边表达式
 
-                    //封装join on 条件
-                    buildAndAddCondition(leftNode, opNode, rightNode, joinConditions);
+                    //封装join on 或 where 条件
+                    buildAndAddCondition(leftNode, opNode, rightNode, filterConditions,isWhere);
                 }
 
 
                 else if (child0 instanceof HiveParser.PrecedenceSimilarExpressionAtomContext) {
+
                     HiveParser.PrecedenceSimilarExpressionAtomContext atomCtx =
                             (HiveParser.PrecedenceSimilarExpressionAtomContext) child0;
 
@@ -452,7 +472,7 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
 
                         ParseTree rightNode = atomCtx.getChild(1); // IN 后面的括号或子查询
 
-                        buildAndAddCondition(leftNode, opNode, rightNode, joinConditions);
+                        buildAndAddCondition(leftNode, opNode, rightNode, filterConditions,isWhere);
                     }
 
                     //情况3: between and
@@ -463,7 +483,7 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
                         ParseTree andright = atomCtx.getChild(3);  //KW_AND 后面的值
 
                         //特殊情况,直接处理，没有使用封装函数
-                        JoinCondition condition = new JoinCondition();
+                        FilterCondition condition = new FilterCondition();
 
                         condition.operator = "BETWEEN";
                         condition.rawConditionText =
@@ -478,7 +498,28 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
                         condition.rightColumns.addAll(astHelper.extractColumnCandidates(andright));
                         optColumnRefsList(condition.rightColumns);
 
-                        joinConditions.add(condition);
+
+                        // between and  之间可能为 子查询
+                        findSubQueriesInNode(rightNode, condition.rightSubQueries);
+                        findSubQueriesInNode(andright, condition.rightSubQueries);
+
+                        //判断是否是where 条件
+                        if (isWhere) {
+
+                            if(!condition.leftColumns.isEmpty()&&!condition.rightColumns.isEmpty()){
+
+                                ColumnRef leftCol = condition.leftColumns.getFirst();
+                                ColumnRef rightCol = condition.rightColumns.getFirst();
+
+                                // 两边都有归属表，且不是同一张表，才是隐式 JOIN
+                                if (leftCol.originTable != null && rightCol.originTable != null
+                                        && leftCol.originTable != rightCol.originTable) {
+                                    condition.isImplicitJoin = true;
+                                }
+                            }
+                        }
+
+                        filterConditions.add(condition);
 
                     }
 
@@ -489,20 +530,21 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
 
                         ParseTree rightNode = atomCtx.getChild(2); // KW_LIKE (KW_ANY | KW_ALL) 后面的值
 
-                        buildAndAddCondition(leftNode, opNode, rightNode, joinConditions);
+                        buildAndAddCondition(leftNode, opNode, rightNode, filterConditions,isWhere);
                     }
 
                 }
             }
-            return joinConditions; // 提取完直接返回，防止重复递归
+            return filterConditions; // 提取完直接返回，防止重复递归
         }
 
         // 4. 保底递归（防止漏掉深层嵌套的括号等）
         for (int i = 0; i < node.getChildCount(); i++) {
-            joinConditions.addAll(optJoinExpression(node.getChild(i)));
+            filterConditions.addAll(optJoinAndWhereExpression(node.getChild(i),isWhere));
         }
-        return joinConditions;
+        return filterConditions;
     }
+
 
     //查找对应的sql语句信息sqlinfo和作用域scope
     public void enterQueryStatementExpression(HiveParser.QueryStatementExpressionContext ctx){
@@ -1526,21 +1568,38 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
 
             int onCount= ctx.KW_ON().size();   //on 条件的个数
 
-            List<JoinCondition> joinConditions=new ArrayList<>();  //用于存放所有on条件中的字段
+            List<FilterCondition> filterConditions =new ArrayList<>();  //用于存放所有on条件中的字段
 
             // 遍历所有的 ON 表达式
             for (HiveParser.ExpressionContext exprCtx : ctx.expression()) {
-                joinConditions.addAll(optJoinExpression(exprCtx));
+                filterConditions.addAll(optJoinAndWhereExpression(exprCtx,false));
             }
 
 
             //将join on 条件关联对应的sql语句
             if(!sqlInfoStack.isEmpty()&&sqlInfoStack.peek()!=null){
-                if(!joinConditions.isEmpty()){
-                    sqlInfoStack.peek().joinConditions.addAll(joinConditions);
+                if(!filterConditions.isEmpty()){
+                    sqlInfoStack.peek().joinConditions.addAll(filterConditions);
                 }
             }
 
+        }
+
+    }
+
+
+    //处理where 条件，将其与对应的sql语句进行关联
+    public void exitSearchCondition(HiveParser.SearchConditionContext ctx) {
+
+        if (ctx!= null && ctx.expression() != null) {
+
+            // 复用 optJoinAndWhereExpression 函数
+            List<FilterCondition> conditions = optJoinAndWhereExpression(ctx.expression(),true);
+
+            // 将解析出来的where条件挂到对应的 SqlInfo 上
+            if (!conditions.isEmpty() && !sqlInfoStack.isEmpty() && sqlInfoStack.peek() != null) {
+                sqlInfoStack.peek().whereConditions.addAll(conditions);
+            }
         }
 
     }

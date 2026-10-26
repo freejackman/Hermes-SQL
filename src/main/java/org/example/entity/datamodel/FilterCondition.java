@@ -1,14 +1,16 @@
 package org.example.entity.datamodel;
 
-import org.antlr.v4.runtime.tree.ParseTree;
-
 import java.util.ArrayList;
 import java.util.List;
 
-public class JoinCondition {
+//用于封装 join on 或 where 后面的条件
+public class FilterCondition {
 
-    public ParseTree leftExpr;   // 左边原始 AST 节点
-    public ParseTree rightExpr;  // 右边原始 AST 节点
+    //如果 WHERE 条件里，左边和右边都有物理字段（比如 a.id = b.id），
+    // 且左边表不等于右边表，那它实际上是一个隐式 JOIN
+    // 这种情况要做好标记，为true，反之只要某一边是纯常量(a.status="1"),则为false
+    public boolean isImplicitJoin=false;
+
     public String operator;      // =, >, <, >=, IN, LIKE, BETWEEN...
 
     // 血缘提取的终极结果

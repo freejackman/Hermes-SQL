@@ -2,8 +2,6 @@ package org.example.util;
 
 import org.example.entity.datamodel.*;
 
-import java.util.List;
-
 //工具类，用来打印输出sql解析的结果
 //SQL 解析结果展示器：树形文本 + JSON 双格式
 public class SqlParseResultPrinter {
@@ -17,6 +15,7 @@ public class SqlParseResultPrinter {
     public static final String MAGENTA = "\u001B[35m";
     public static final String CYAN = "\u001B[36m";
     public static final String PURPLE = "\u001B[35m";
+    public static final String WHITE = "\u001B[37m";
 
     private boolean useColor = true;
 
@@ -51,21 +50,29 @@ public class SqlParseResultPrinter {
             sb.append(indent).append("│   ├─ ").append(formatTable(t)).append("\n");
         }
 
-        // ★★★ 3. 新增：JOIN ON 条件 ★★★
-        if (sql.joinConditions != null && !sql.joinConditions.isEmpty()) {
-            sb.append(indent).append("│ ").append(c(YELLOW, "🔗 JoinConditions(" + sql.joinConditions.size() + "):")).append("\n");
-            for (JoinCondition jc : sql.joinConditions) {
-                printJoinCondition(jc, sb, depth + 1);
+        // 3. WHERE 条件
+        if (sql.whereConditions != null && !sql.whereConditions.isEmpty()) {
+            sb.append(indent).append("│ ").append(c(WHITE, "🔍 WhereConditions(" + sql.whereConditions.size() + "):")).append("\n");
+            for (FilterCondition wc : sql.whereConditions) {
+                printFilterCondition(wc, sb, depth + 1,true);
             }
         }
 
-        // 4. 查询列
+        // 4. JOIN ON 条件
+        if (sql.joinConditions != null && !sql.joinConditions.isEmpty()) {
+            sb.append(indent).append("│ ").append(c(YELLOW, "🔗 JoinConditions(" + sql.joinConditions.size() + "):")).append("\n");
+            for (FilterCondition jc : sql.joinConditions) {
+                printFilterCondition(jc, sb, depth + 1,false);
+            }
+        }
+
+        // 5. 查询列
         sb.append(indent).append("│ ").append(c(MAGENTA, "📋 SelectItems(" + sql.selectItems.size() + "):")).append("\n");
         for (int i = 0; i < sql.selectItems.size(); i++) {
             printSelectItem(sql.selectItems.get(i), sb, depth + 1, i + 1);
         }
 
-        // 5. 子查询递归
+        // 6. 子查询递归
         if (!sql.childSqls.isEmpty()) {
             sb.append(indent).append("│ ").append(c(CYAN, "🔍 SubQueries(" + sql.childSqls.size() + "):")).append("\n");
             for (SqlInfo child : sql.childSqls) {
@@ -76,41 +83,50 @@ public class SqlParseResultPrinter {
         sb.append(indent).append(c(CYAN, "└─")).append("\n");
     }
 
-    // ★ 新增：打印 JOIN 条件
-    private void printJoinCondition(JoinCondition jc, StringBuilder sb, int depth) {
+
+
+    private void printFilterCondition(FilterCondition cond, StringBuilder sb, int depth, boolean isWhere) {
         String indent = "  ".repeat(depth);
 
-        // 打印操作符和原始文本
-        sb.append(indent).append("├─ ").append(c(YELLOW, "[" + jc.operator + "] "))
-                .append(truncate(jc.rawConditionText, 60)).append("\n");
+        // 根据是 WHERE 还是 JOIN 选择主色调
+        String mainColor = isWhere ? WHITE : YELLOW;
 
-        // 打印左侧字段
-        if (jc.leftColumns != null && !jc.leftColumns.isEmpty()) {
-            sb.append(indent).append("│   ├─ Left:  ");
-            for (int i = 0; i < jc.leftColumns.size(); i++) {
-                if (i > 0) sb.append(", ");
-                sb.append(formatColumnRef(jc.leftColumns.get(i)));
-            }
-            sb.append("\n");
+        // 如果是隐式 JOIN，增加高亮警告
+        String implicitTag = "";
+        if (cond.isImplicitJoin) {
+            implicitTag = c(RED, " [⚠ 隐式JOIN]");
         }
 
-        // 打印左侧子查询
-        if (jc.leftSubQueries != null && !jc.leftSubQueries.isEmpty()) {
-            sb.append(indent).append("│   ├─ Left SubQuery: (see child SQLs below)\n");
+        sb.append(indent).append("├─ ").append(c(mainColor, "[" + cond.operator + "] "))
+                .append(truncate(cond.rawConditionText, 60))
+                .append(implicitTag)
+                .append("\n");
+
+        // 打印左侧字段
+        if (cond.leftColumns != null && !cond.leftColumns.isEmpty()) {
+            sb.append(indent).append("│   ├─ Left:  ");
+            for (int i = 0; i < cond.leftColumns.size(); i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(formatColumnRef(cond.leftColumns.get(i)));
+            }
+            sb.append("\n");
         }
 
         // 打印右侧字段
-        if (jc.rightColumns != null && !jc.rightColumns.isEmpty()) {
+        if (cond.rightColumns != null && !cond.rightColumns.isEmpty()) {
             sb.append(indent).append("│   ├─ Right: ");
-            for (int i = 0; i < jc.rightColumns.size(); i++) {
+            for (int i = 0; i < cond.rightColumns.size(); i++) {
                 if (i > 0) sb.append(", ");
-                sb.append(formatColumnRef(jc.rightColumns.get(i)));
+                sb.append(formatColumnRef(cond.rightColumns.get(i)));
             }
             sb.append("\n");
         }
 
-        // 打印右侧子查询
-        if (jc.rightSubQueries != null && !jc.rightSubQueries.isEmpty()) {
+        // 打印子查询（如果存在）
+        if (cond.leftSubQueries != null && !cond.leftSubQueries.isEmpty()) {
+            sb.append(indent).append("│   ├─ Left SubQuery: (see child SQLs below)\n");
+        }
+        if (cond.rightSubQueries != null && !cond.rightSubQueries.isEmpty()) {
             sb.append(indent).append("│   ├─ Right SubQuery: (see child SQLs below)\n");
         }
     }
