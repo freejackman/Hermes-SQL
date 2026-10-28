@@ -14,7 +14,16 @@ import java.util.Map;
 public class Main {
     public static void main(String[] args) {
 
-        String sql="SELECT a.name FROM tableA a JOIN tableB b ON a.id = b.id WHERE a.status = 1 AND b.amount > 100 AND and a.name = b.name" ;
+        String sql= """
+                SELECT\s
+                    t1.dept_id,\s
+                    t1.emp_name,
+                    ROW_NUMBER() OVER (PARTITION BY t1.dept_id ORDER BY t1.salary DESC) as rn
+                FROM employee t1
+                WHERE t1.status = 'ACTIVE'
+                GROUP BY t1.dept_id, t1.emp_name, t1.salary
+                HAVING SUM(t1.salary) > 10000;
+                """ ;
 
         //用于记录所有sql语句与节点的一对一关系，sql中包含对应的scope作用域信息
         Map<ParserRuleContext, SqlInfo> sqlInfoMap = new HashMap<>();

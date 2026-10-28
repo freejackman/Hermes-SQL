@@ -17,6 +17,10 @@ public class SqlParseResultPrinter {
     public static final String PURPLE = "\u001B[35m";
     public static final String WHITE = "\u001B[37m";
 
+    // ★ 新增：亮色系（在 IDEA 深色主题下更清晰）
+    public static final String BRIGHT_BLUE = "\u001B[94m";
+    public static final String BRIGHT_CYAN = "\u001B[96m";
+
     private boolean useColor = true;
 
     public SqlParseResultPrinter() {}
@@ -50,7 +54,17 @@ public class SqlParseResultPrinter {
             sb.append(indent).append("│   ├─ ").append(formatTable(t)).append("\n");
         }
 
-        // 3. WHERE 条件
+
+        // 3. JOIN ON 条件
+        if (sql.joinConditions != null && !sql.joinConditions.isEmpty()) {
+            sb.append(indent).append("│ ").append(c(YELLOW, "🔗 JoinConditions(" + sql.joinConditions.size() + "):")).append("\n");
+            for (FilterCondition jc : sql.joinConditions) {
+                printFilterCondition(jc, sb, depth + 1,false);
+            }
+        }
+
+
+        // 4. WHERE 条件
         if (sql.whereConditions != null && !sql.whereConditions.isEmpty()) {
             sb.append(indent).append("│ ").append(c(WHITE, "🔍 WhereConditions(" + sql.whereConditions.size() + "):")).append("\n");
             for (FilterCondition wc : sql.whereConditions) {
@@ -58,11 +72,20 @@ public class SqlParseResultPrinter {
             }
         }
 
-        // 4. JOIN ON 条件
-        if (sql.joinConditions != null && !sql.joinConditions.isEmpty()) {
-            sb.append(indent).append("│ ").append(c(YELLOW, "🔗 JoinConditions(" + sql.joinConditions.size() + "):")).append("\n");
-            for (FilterCondition jc : sql.joinConditions) {
-                printFilterCondition(jc, sb, depth + 1,false);
+
+        // 5. 打印 GROUP BY
+        if (sql.groupByColumns != null && !sql.groupByColumns.isEmpty()) {
+            sb.append(indent).append("│ ").append(c(PURPLE, "📊 GroupBy(" + sql.groupByColumns.size() + "):")).append("\n");
+            for (ColumnRef col : sql.groupByColumns) {
+                sb.append(indent).append("│   ├─ ").append(formatColumnRef(col)).append("\n");
+            }
+        }
+
+        // 6. 打印 HAVING
+        if (sql.havingConditions != null && !sql.havingConditions.isEmpty()) {
+            sb.append(indent).append("│ ").append(c(YELLOW, "🔍 HavingConditions(" + sql.havingConditions.size() + "):")).append("\n");
+            for (FilterCondition hc : sql.havingConditions) {
+                printFilterCondition(hc, sb, depth + 1, false); // 复用你之前的条件打印方法
             }
         }
 
@@ -167,14 +190,57 @@ public class SqlParseResultPrinter {
 
     private void printFunction(FunctionInfo f, StringBuilder sb, int depth) {
         String indent = "  ".repeat(depth);
+
+        // 如果是窗口函数，加个特殊标识
         String prefix = f.isNested ? "└─[nested] " : "├─ ";
-        sb.append(indent).append(prefix).append(c(MAGENTA, f.functionName))
+        String funcTag = f.isWindowFunction ? c(PURPLE, "[窗口函数] ") : "";
+
+        sb.append(indent).append(prefix).append(funcTag).append(c(MAGENTA, f.functionName))
                 .append("(").append(f.arguments.size()).append(" args)\n");
 
+        // 打印常规参数
         for (FunctionArgument arg : f.arguments) {
             sb.append(indent).append("│   └─ ").append(formatArg(arg)).append("\n");
         }
+
+        // ★ 深度打印窗口函数特有属性
+        if (f.isWindowFunction) {
+            String winIndent = "  ".repeat(depth + 1);
+            sb.append(winIndent).append(c(PURPLE, "└─ OVER() 子句:\n"));
+            String detailIndent = "  ".repeat(depth + 2);
+
+            // 1. PARTITION BY
+            if (!f.partitionByColumns.isEmpty()) {
+                sb.append(detailIndent).append("├─ PARTITION BY: ");
+                for (int i = 0; i < f.partitionByColumns.size(); i++) {
+                    if (i > 0) sb.append(", ");
+                    sb.append(formatColumnRef(f.partitionByColumns.get(i)));
+                }
+                sb.append("\n");
+            }
+
+            // 2. ORDER BY
+            if (!f.orderByColumns.isEmpty()) {
+                sb.append(detailIndent).append("├─ ORDER BY: ");
+                for (int i = 0; i < f.orderByColumns.size(); i++) {
+                    if (i > 0) sb.append(", ");
+                    sb.append(formatColumnRef(f.orderByColumns.get(i)));
+                }
+                sb.append("\n");
+            }
+
+            // 3. 窗口边界 (ROWS / RANGE)
+            if (f.windowFrame != null && !f.windowFrame.isEmpty()) {
+                sb.append(detailIndent).append("├─ FRAME: ").append(c(YELLOW, f.windowFrame)).append("\n");
+            }
+
+            // 4. NULL 处理 (IGNORE NULLS / RESPECT NULLS)
+            if (f.nullTreatment != null && !f.nullTreatment.isEmpty()) {
+                sb.append(detailIndent).append("├─ NULLS: ").append(c(YELLOW, f.nullTreatment)).append("\n");
+            }
+        }
     }
+
 
     private String formatTable(TableInfo t) {
         // ★ 安全判空：防止 t.dataBaseName 或 t.tableName 为 null 导致 NPE

@@ -24,6 +24,8 @@ public class SqlInfo {
 
     public List<FilterCondition> joinConditions =new ArrayList<>();    // JOIN条件（独立出来）
     public List<FilterCondition> whereConditions=new ArrayList<>();       // WHERE条件中的字段
+    public List<FilterCondition> havingConditions=new ArrayList<>();       // HAVING条件中的字段
+    public List<ColumnRef> groupByColumns= new ArrayList<>();   // GROUP BY 后面的字段
 
     // 对比辅助字段
     //public String fingerprint;                      // 结构指纹（用于快速匹配）

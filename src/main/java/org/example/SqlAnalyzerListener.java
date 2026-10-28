@@ -30,6 +30,10 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
     //用于接收第一阶段构建好的sqlinfo以及对应的scope作用域
     Map<ParserRuleContext, SqlInfo> sqlInfoMap ;
 
+    //用于判断 当前是否在 窗口函数当中,避免将 over()中的字段当作函数参数挂载上去
+    private boolean isInsideWindowSpec = false;
+
+
 
 
     //构造函数
@@ -1000,6 +1004,11 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
     //完善select 查询列信息
     public void enterPrecedenceFieldExpression(HiveParser.PrecedenceFieldExpressionContext ctx){
 
+        //判断 当前是否在 窗口函数的over()当中
+        if (isInsideWindowSpec) {
+            return;
+        }
+
         if(!selectItemStack.isEmpty() && selectItemStack.peek()!=null){
 
             SelectItem selectItem = selectItemStack.peek();    //获取到当前正在解析的查询列
@@ -1545,19 +1554,118 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
     }
 
 
-    //设置查询列表达式类型为 FUNCTION,函数处理完毕,弹出栈
+    //设置查询列表达式类型为 FUNCTION,函数处理完毕,弹出栈,处理窗口函数
     public void exitFunction_(HiveParser.Function_Context ctx){
 
         if(!selectItemStack.isEmpty() && selectItemStack.peek()!=null){
             selectItemStack.peek().exprType=ExpressionType.FUNCTION;
         }
 
+        FunctionInfo functionInfo= null;   //用于记录弹出的functionInfo
+
         if(!functionStack.isEmpty()
                 && !selectItemStack.isEmpty()
                 && functionStack.peek().functionLever == selectItemStack.peek().selectItemLevel){
 
-            functionStack.pop();  //函数弹出
+            functionInfo=functionStack.pop();  //函数弹出
         }
+
+        if(functionInfo==null){
+            return;
+        }
+
+        //处理窗口函数部分
+
+
+
+        //语法为  WITHIN GROUP (有序聚合函数)
+        if(ctx.within!=null){
+
+            //标记为窗口函数
+            functionInfo.isWindowFunction=true;
+
+            //获取 order by 节点
+            HiveParser.OrderByClauseContext orderCtx = ctx.ordBy;
+
+            //通过order by 节点获取并封装该节点对应的所有 字段
+            List<ColumnRef> orderCols = astHelper.extractColumnCandidates(orderCtx);
+            optColumnRefsList(orderCols);
+
+            //将functionInfo与order by 字段信息相关联
+            functionInfo.orderByColumns.addAll(orderCols);
+
+        }
+
+
+        //语法为 OVER(……)
+        if (ctx.KW_OVER() != null && ctx.ws != null) {
+
+            //标记为窗口函数
+            functionInfo.isWindowFunction = true;
+
+            // 检查 null_treatment(空值处理策略)
+            if (ctx.nt != null) {
+                functionInfo.nullTreatment = ctx.nt.getText(); // 记录下 null_treatment(空值处理策略)
+            }
+
+            // 2. 解析 window_specification(over后面括号内部的内容)
+            HiveParser.Window_specificationContext wsCtx = ctx.ws;
+
+
+
+            // 特殊情况：如果只是 OVER w1，即引用了一个 命名窗口，则这里可能只是个 id_
+            // 命名窗口 存在的意义就是避免 窗口被重复定义，其追求的是 一次定义，多次使用
+            /*
+            SELECT
+                val,
+                ROW_NUMBER() OVER w AS rn,
+                RANK()       OVER w AS rk,
+                DENSE_RANK() OVER w AS dr
+            FROM numbers
+            WINDOW w AS (ORDER BY val); -- 定义一次，命名为 w
+            */
+            if (wsCtx.id_() != null) {
+
+                functionInfo.nameWindow = wsCtx.id_().getText();
+
+            }
+
+
+            // PARTITION BY 等一系列表达式 存在
+            else if (wsCtx.partitioningSpec() != null) {
+
+                HiveParser.PartitioningSpecContext spec = wsCtx.partitioningSpec();
+
+                // 提取 PARTITION BY(如果存在)
+                if (spec.partitionByClause() != null) {
+
+                    List<ColumnRef> partCols = astHelper.extractColumnCandidates(spec.partitionByClause().expressions());
+                    optColumnRefsList(partCols);
+
+                    //将functionInfo与 PARTITION BY 字段信息相关联
+                    functionInfo.partitionByColumns.addAll(partCols);
+                }
+
+                // 提取 ORDER BY(如果存在)
+                if (spec.orderByClause() != null) {
+
+                    List<ColumnRef> orderCols = astHelper.extractColumnCandidates(spec.orderByClause());
+                    optColumnRefsList(orderCols);
+
+                    //将functionInfo与order by 字段信息相关联
+                    functionInfo.orderByColumns.addAll(orderCols);
+                }
+            }
+
+
+            // 提取 window_frame (窗口函数的上下窗口范围)(如果存在)
+            if (wsCtx.window_frame() != null) {
+                functionInfo.windowFrame = wsCtx.window_frame().getText(); // 直接拿原始文本
+                                                            // 如:"ROWS BETWEEN 1 PRECEDING AND CURRENT ROW"
+            }
+        }
+
+
     }
 
 
@@ -1602,6 +1710,46 @@ public class SqlAnalyzerListener extends HiveParserBaseListener {
             }
         }
 
+    }
+
+    //处理 group by后面的字段，将其与对应的sql语句关联
+    public void exitGroupByClause(HiveParser.GroupByClauseContext ctx) {
+
+        // 获取group by 后面的所有字段
+        List<ColumnRef> groupCols = astHelper.extractColumnCandidates(ctx.groupby_expression());
+
+        //查找并绑定各字段的数据来源
+        optColumnRefsList(groupCols);
+
+        if (sqlInfoStack.peek() != null) {
+            sqlInfoStack.peek().groupByColumns.addAll(groupCols);
+        }
+    }
+
+
+    //处理 having 条件，将其与对应的sql语句关联
+    public void exitHavingClause(HiveParser.HavingClauseContext ctx) {
+        if (ctx.havingCondition() != null && ctx.havingCondition().expression() != null) {
+
+            //复用optJoinAndWhereExpression函数
+            List<FilterCondition> conditions = optJoinAndWhereExpression(ctx.havingCondition().expression(), true);
+
+            // 将解析出来的having条件挂到对应的 SqlInfo 上
+            if (!conditions.isEmpty() && !sqlInfoStack.isEmpty()) {
+                sqlInfoStack.peek().havingConditions.addAll(conditions);
+            }
+        }
+    }
+
+
+    //设置 是否在窗口函数中 的标识为true
+    public void enterWindow_specification(HiveParser.Window_specificationContext ctx) {
+        isInsideWindowSpec = true;
+    }
+
+    //更新 是否在窗口函数中 的标识为false
+    public void exitWindow_specification(HiveParser.Window_specificationContext ctx) {
+        isInsideWindowSpec = false;
     }
 
 }
