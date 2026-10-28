@@ -28,10 +28,9 @@
 - **双遍历架构 (Dual-pass)**：第一阶段（`ScopeBuilderListener`）专职构建作用域与表映射；第二阶段（`SqlAnalyzerListener`）专职提取字段血缘，彻底解耦 `SELECT` 与 `FROM` 的解析顺序依赖。
 - **多栈协同管理 (Multi-stack)**：采用 SQL 嵌套栈、作用域栈、查询列栈、函数栈联动，完美处理深层嵌套。
 - **复杂 SQL 场景全覆盖**：支持多表 JOIN、子查询（FROM 级/列级）、CASE WHEN 多源表达式、LATERAL VIEW (UDTF 虚拟列穿透)、分区表函数 (PTF)。
-- **精准血缘定位**：解决 `t1.id` vs `id` 别名归属问题，自动标记多表同名字段歧义 (`isAmbiguous`)。
-- **深度关联关系分析**：自动提取 JOIN ON 中的等值与非等值条件（支持拉链表时间窗口），精准识别物理字段级别的关联依赖。
-- **统一过滤条件模型 (FilterCondition)**：完美统一 `JOIN ON` 与 `WHERE` 子句解析。支持提取 `AND/OR` 嵌套、`IN / BETWEEN / LIKE`，并**自动识别 WHERE 中的隐式 JOIN**。
-
+- **高阶子句深度穿透**：不仅解析表层字段，更能精准捕获 `GROUP BY`、`HAVING` 的聚合血缘依赖。
+- **窗口函数 (Window Functions) 无损解析**：深入 `OVER()` 子句内部，精准提取 `PARTITION BY` 与 `ORDER BY` 的底层物理字段依赖，解决脱敏策略在 Shuffle 阶段失效的安全盲区。
+- **统一条件模型 (FilterCondition)**：完美统一 `JOIN ON` 与 `WHERE` 子句。支持提取 `AND/OR` 嵌套、`IN / BETWEEN / LIKE`，自动标记 `WHERE` 中的隐式 JOIN。
 ---
 
 ## 🧩 模块设计
@@ -64,7 +63,7 @@ mvn clean install -DskipTests
 ```
 ### 2.解析你的第一条 SQL
 ```java
-String sql = "SELECT t.id, score FROM t LATERAL VIEW explode(arr) e AS score";
+String sql = "SELECT t1.dept_id, ROW_NUMBER() OVER (PARTITION BY t1.dept_id ORDER BY t1.salary DESC) as rn FROM employee t1 WHERE t1.status = 'ACTIVE' GROUP BY t1.dept_id, t1.salary";
 
 // 1. 词法 & 语法解析
 HiveLexer lexer = new HiveLexer(CharStreams.fromString(sql));
@@ -73,10 +72,12 @@ ParseTree tree = parser.statement();
 
 // 2. 第一阶段：构建作用域 (Double-pass Pass 1)
 Map<ParserRuleContext, SqlInfo> sqlInfoMap = new IdentityHashMap<>();
-ParseTreeWalker.DEFAULT.walk(new ScopeBuilderListener(sqlInfoMap), tree);
+ScopeBuilderListener scopeBuilder = new ScopeBuilderListener(sqlInfoMap);
+ParseTreeWalker.DEFAULT.walk(scopeBuilder, tree);
 
 // 3. 第二阶段：字段血缘提取 (Double-pass Pass 2)
-ParseTreeWalker.DEFAULT.walk(new SqlAnalyzerListener(sqlInfoMap), tree);
+SqlAnalyzerListener sqlAnalyzer = new SqlAnalyzerListener(sqlInfoMap);
+ParseTreeWalker.DEFAULT.walk(sqlAnalyzer, tree);
 
 // 4. 树形输出展示 (注意 print 返回的是 String，需要输出到控制台)
 SqlParseResultPrinter printer = new SqlParseResultPrinter(true);
@@ -84,32 +85,36 @@ System.out.println(printer.print(scopeBuilder.firstSqlInfo));
 ```
 ### 3.解析效果展示
 
-对于 SQL SELECT a.name, b.amount FROM user_table a JOIN order_table b ON a.id = b.user_id WHERE a.status = 1 AND b.amount > 100，核心血缘追踪输出如下：
+对于包含 JOIN、WHERE、GROUP BY、HAVING 以及窗口函数 的复杂 SQL，引擎能精准输出各层级依赖如下：
 ```
-┌─ [SQL L1] SELECTa.name,b.amountFROMuser_tableaJOINorder_tablebONa.id=b.user_idWHEREa.status=1ANDb.amount>100
-│ 📦 Tables(2):
-│   ├─ user_table AS a [PHYSICAL, L1]
-│   ├─ order_table AS b [PHYSICAL, L1]
-│ 🔍 WhereConditions(2):
-│   ├─ [=] a.status = 1
-│   │   ├─ Left:  user_table.status (from=a)
-│   ├─ [>] b.amount > 100
-│   │   ├─ Left:  order_table.amount (from=b)
-│ 🔗 JoinConditions(1):
-│   ├─ [=] a.id = b.user_id
-│   │   ├─ Left:  user_table.id (from=a)
-│   │   ├─ Right: order_table.user_id (from=b)
+┌─ [SQL L1] SELECT t1.dept_id, ROW_NUMBER() OVER (PARTITION BY t1.dept_id...
+│ 📦 Tables(1):
+│   ├─ employee AS t1 [PHYSICAL, L1]
+│ 🔍 WhereConditions(1):
+│   ├─ [=] t1.status = 'ACTIVE'
+│   │   ├─ Left:  employee.status (from=t1)
+│ 📊 GroupBy(2):
+│   ├─ employee.dept_id (from=t1)
+│   ├─ employee.salary (from=t1)
+│ 🔍 HavingConditions(1):
+│   ├─ [>] SUM(t1.salary) > 10000
+│   │   ├─ Left:  employee.salary (from=t1)
 │ 📋 SelectItems(2):
-│   ├─ #1 a.name
+│   ├─ #1 t1.dept_id
 │   │   ├─ exprType=DIRECT, transformType=DIRECT
 │   │   ├─ 🩸 SourceColumns(1):
-│   │   │   └─ user_table.name (from=a)
-│   ├─ #2 b.amount
-│   │   ├─ exprType=DIRECT, transformType=DIRECT
-│   │   ├─ 🩸 SourceColumns(1):
-│   │   │   └─ order_table.amount (from=b)
+│   │   │   └─ employee.dept_id (from=t1)
+│   ├─ #2 ROW_NUMBER() OVER...
+│   │   ├─ exprType=FUNCTION, transformType=SIMPLE
+│   │   ├─ 🩸 SourceColumns(2):
+│   │   │   ├─ employee.dept_id (from=t1)
+│   │   │   ├─ employee.salary (from=t1)
+│   │   ├─ 🧩 FunctionChain(1):
+│   │   │   ├─ [窗口函数] ROW_NUMBER(0 args)
+│   │   │   │   └─ OVER() 子句:
+│   │   │   │       ├─ PARTITION BY: employee.dept_id (from=t1)
+│   │   │   │       ├─ ORDER BY: employee.salary (from=t1)
 ```
-## 🗺️ 开发路线图 (Roadmap)
 ## 🗺️ 开发路线图 (Roadmap)
 ☑ v0.1.0 基础骨架与数据模型设计 (2026-08)
 
@@ -123,9 +128,11 @@ System.out.println(printer.print(scopeBuilder.firstSqlInfo));
 
 ☑ v0.4.1 可视化展示升级：树形结构高亮区分、SqlParseResultPrinter 完善 (2026-10-26)
 
-□ v0.5.0 元数据服务接入（解析无元数据的裸字段）
+☑ v0.5.0 高阶子句解析：GROUP BY、HAVING 与窗口函数（OVER）依赖提取 (2026-10-29)
 
-□ v0.6.0 方言差异分析模块 (hermes-diff) 与 SQL 隐式命名检测
+□ v0.6.0 元数据服务接入（解析无元数据的裸字段）
+
+□ v0.7.0 方言差异分析模块 (hermes-diff) 与 SQL 隐式命名检测
 
 □ v1.0.0 血缘可视化与安全等级推导引擎闭环
 
@@ -137,7 +144,7 @@ System.out.println(printer.print(scopeBuilder.firstSqlInfo));
 ## 👤 作者
 freejackman
 测试开发工程师 | 技术爱好者,极客梦想家,工程落地派,交付守夜人
-"在数据流转的黑盒中，做那个点亮火把的人。"
+
 
 ## 🤝 贡献
 欢迎提交 Issue 和 Pull Request。如果你有新的引擎适配需求（如 Presto、Doris），请开启讨论。
