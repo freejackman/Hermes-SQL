@@ -1,4 +1,4 @@
-package org.example;
+package org.example.hivesql;
 
 
 import org.antlr.v4.runtime.ParserRuleContext;
@@ -33,7 +33,7 @@ public class ScopeBuilderListener extends HiveParserBaseListener {
     // 因为两次遍历都是遍历的同一个parserTree，ParserRuleContext类可以保证节点的唯一性
     Map<ParserRuleContext, SqlInfo> sqlInfoMap ;  //将节点与sql语句信息进行绑定。并存储起来
 
-    SqlInfo firstSqlInfo=null ;   //用于记录最外层的sql语句信息，方便打印
+    public SqlInfo firstSqlInfo=null ;   //用于记录最外层的sql语句信息，方便打印
 
 
     //作用域构造类的构造函数

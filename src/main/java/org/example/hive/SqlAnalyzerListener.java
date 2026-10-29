@@ -1,4 +1,4 @@
-package org.example;
+package org.example.hivesql;
 
 import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.tree.ParseTree;
