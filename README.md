@@ -24,6 +24,7 @@
 
 ## ✨ 核心特性 (Features)
 
+- **门面模式与方言隔离**：基于 `SqlParser` 统一接口封装，按方言（Hive/Spark）划分独立模块，彻底解耦外部调用与底层 ANTLR 遍历逻辑，具备极强的扩展性。
 - **自研轻量级血缘解析引擎**：基于 ANTLR4，无重型框架（如 Calcite）依赖，高度可定制。
 - **双遍历架构 (Dual-pass)**：第一阶段（`ScopeBuilderListener`）专职构建作用域与表映射；第二阶段（`SqlAnalyzerListener`）专职提取字段血缘，彻底解耦 `SELECT` 与 `FROM` 的解析顺序依赖。
 - **多栈协同管理 (Multi-stack)**：采用 SQL 嵌套栈、作用域栈、查询列栈、函数栈联动，完美处理深层嵌套。
@@ -31,17 +32,26 @@
 - **高阶子句深度穿透**：不仅解析表层字段，更能精准捕获 `GROUP BY`、`HAVING` 的聚合血缘依赖。
 - **窗口函数 (Window Functions) 无损解析**：深入 `OVER()` 子句内部，精准提取 `PARTITION BY` 与 `ORDER BY` 的底层物理字段依赖，解决脱敏策略在 Shuffle 阶段失效的安全盲区。
 - **统一条件模型 (FilterCondition)**：完美统一 `JOIN ON` 与 `WHERE` 子句。支持提取 `AND/OR` 嵌套、`IN / BETWEEN / LIKE`，自动标记 `WHERE` 中的隐式 JOIN。
+
 ---
 
-## 🧩 模块设计
-```
-hermes-sql (父POM)
-├── hermes-core # 核心解析引擎（双遍历架构、Scope作用域管理、血缘提取）【已完成】
-├── hermes-diff # 方言差异分析器（Hive vs Spark 差异对比）【开发中】
-├── hermes-lineage # 血缘图谱构建（支持导出为 Neo4j 图数据库）【规划中】
-└── hermes-security # 安全等级推导引擎（敏感字段脱敏验证）【规划中】
-```
+## 🧩 项目结构
 
+```text
+hermes-sql
+├── src/main/antlr4/org/example
+│   ├── hive/             # Hive 官方语法文件 (HiveLexer.g4, HiveParser.g4)
+│   └── spark/            # Spark 官方语法文件 (预留)
+├── src/main/java/org/example
+│   ├── SqlParser.java    # 统一解析接口 (Interface)
+│   ├── hive/             # Hive 解析模块
+│   │   ├── HiveSql.java             # Hive 门面类 (实现 SqlParser)
+│   │   ├── ScopeBuilderListener.java# 阶段一：作用域构建
+│   │   └── SqlAnalyzerListener.java # 阶段二：血缘提取
+│   ├── spark/            # Spark 解析模块 (规划中)
+│   ├── entity.datamodel/ # 通用血缘数据模型 (SqlInfo, TableInfo, ColumnRef 等)
+│   └── util/             # 通用工具类 (AST 辅助提取、树形打印展示)
+└── pom.xml
 ---
 
 ## 🛠️ 技术栈
@@ -55,6 +65,8 @@ hermes-sql (父POM)
 
 ## 📦 快速开始
 
+得益于门面模式的设计，使用者无需关心底层的 ANTLR 遍历逻辑，只需面向 SqlParser 接口调用即可
+
 ### 1. 克隆与构建
 ```bash
 git clone https://github.com/freejackman/Hermes-SQL.git
@@ -63,29 +75,31 @@ mvn clean install -DskipTests
 ```
 ### 2.解析你的第一条 SQL
 ```java
-String sql = "SELECT t1.dept_id, ROW_NUMBER() OVER (PARTITION BY t1.dept_id ORDER BY t1.salary DESC) as rn FROM employee t1 WHERE t1.status = 'ACTIVE' GROUP BY t1.dept_id, t1.salary";
+import org.example.SqlParser;
+import org.example.hive.HiveSql;
+import org.example.entity.datamodel.SqlInfo;
+import org.example.util.SqlParseResultPrinter;
 
-// 1. 词法 & 语法解析
-HiveLexer lexer = new HiveLexer(CharStreams.fromString(sql));
-HiveParser parser = new HiveParser(new CommonTokenStream(lexer));
-ParseTree tree = parser.statement();
+public class Main {
+    public static void main(String[] args) {
+        String sql = "SELECT t1.dept_id, ROW_NUMBER() OVER (PARTITION BY t1.dept_id ORDER BY t1.salary DESC) as rn " +
+                "FROM employee t1 WHERE t1.status = 'ACTIVE' GROUP BY t1.dept_id, t1.salary";
 
-// 2. 第一阶段：构建作用域 (Double-pass Pass 1)
-Map<ParserRuleContext, SqlInfo> sqlInfoMap = new IdentityHashMap<>();
-ScopeBuilderListener scopeBuilder = new ScopeBuilderListener(sqlInfoMap);
-ParseTreeWalker.DEFAULT.walk(scopeBuilder, tree);
+        // 1. 实例化对应方言的解析引擎
+        SqlParser engine = new HiveSql();
 
-// 3. 第二阶段：字段血缘提取 (Double-pass Pass 2)
-SqlAnalyzerListener sqlAnalyzer = new SqlAnalyzerListener(sqlInfoMap);
-ParseTreeWalker.DEFAULT.walk(sqlAnalyzer, tree);
+        // 2. 一行代码完成双重遍历与血缘提取
+        SqlInfo sqlInfo = engine.parse(sql);
 
-// 4. 树形输出展示 (注意 print 返回的是 String，需要输出到控制台)
-SqlParseResultPrinter printer = new SqlParseResultPrinter(true);
-System.out.println(printer.print(scopeBuilder.firstSqlInfo));
+        // 3. 树形输出展示
+        SqlParseResultPrinter printer = new SqlParseResultPrinter(true);
+        System.out.println(printer.print(sqlInfo));
+    }
+}
 ```
 ### 3.解析效果展示
 
-对于包含 JOIN、WHERE、GROUP BY、HAVING 以及窗口函数 的复杂 SQL，引擎能精准输出各层级依赖如下：
+对于包含 JOIN、WHERE、GROUP BY、HAVING 以及窗口函数 的复杂 SQL，引擎能精准输出各层级依赖如下:
 ```
 ┌─ [SQL L1] SELECT t1.dept_id, ROW_NUMBER() OVER (PARTITION BY t1.dept_id...
 │ 📦 Tables(1):
@@ -126,13 +140,15 @@ System.out.println(printer.print(scopeBuilder.firstSqlInfo));
 
 ☑ v0.4.0 条件解析大满贯：JOIN ON 深度解析、WHERE 过滤条件、隐式 JOIN 识别 (2026-10-24)
 
-☑ v0.4.1 可视化展示升级：树形结构高亮区分、SqlParseResultPrinter 完善 (2026-10-26)
-
 ☑ v0.5.0 高阶子句解析：GROUP BY、HAVING 与窗口函数（OVER）依赖提取 (2026-10-29)
 
-□ v0.6.0 元数据服务接入（解析无元数据的裸字段）
+☑ v0.6.0 架构演进：引入 SqlParser 门面接口，实现 Hive 与 Spark 模块隔离与解耦 (2026-10-30)
 
-□ v0.7.0 方言差异分析模块 (hermes-diff) 与 SQL 隐式命名检测
+□ v0.7.0 元数据服务接入（解析无元数据的裸字段）与本地 YAML 模拟器
+
+□ v0.8.0 Spark 方言解析器落地
+
+□ v0.9.0 方言差异分析模块 (hermes-diff) 与 SQL 隐式命名检测
 
 □ v1.0.0 血缘可视化与安全等级推导引擎闭环
 
