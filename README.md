@@ -52,8 +52,8 @@ hermes-sql
 │   ├── entity.datamodel/ # 通用血缘数据模型 (SqlInfo, TableInfo, ColumnRef 等)
 │   └── util/             # 通用工具类 (AST 辅助提取、树形打印展示)
 └── pom.xml
+```
 ---
-
 ## 🛠️ 技术栈
 
 - **Java 11+** (开发环境)
@@ -68,6 +68,7 @@ hermes-sql
 得益于门面模式的设计，使用者无需关心底层的 ANTLR 遍历逻辑，只需面向 SqlParser 接口调用即可
 
 ### 1. 克隆与构建
+
 ```bash
 git clone https://github.com/freejackman/Hermes-SQL.git
 cd Hermes-SQL
